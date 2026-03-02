@@ -122,6 +122,7 @@ export interface WeatherSignal {
   ensemble_std: number
   ensemble_members: number
   actionable: boolean
+  platform?: string
 }
 
 export interface DashboardData {

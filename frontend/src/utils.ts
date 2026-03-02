@@ -12,6 +12,10 @@ export function getMarketUrl(platform: string, ticker: string, eventSlug?: strin
     return `https://polymarket.com/event/${ticker}`
   }
 
+  if (platformLower === 'kalshi') {
+    return `https://kalshi.com/markets/${ticker}`
+  }
+
   return '#'
 }
 
@@ -33,13 +37,18 @@ export function formatPercent(value: number, decimals = 1): string {
   return `${(value * 100).toFixed(decimals)}%`
 }
 
-export const platformStyles = {
+export const platformStyles: Record<string, { badge: string; icon: string; name: string }> = {
   polymarket: {
     badge: 'bg-purple-500/10 text-purple-400 border-purple-500/20',
     icon: 'P',
     name: 'Polymarket'
+  },
+  kalshi: {
+    badge: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
+    icon: 'K',
+    name: 'Kalshi'
   }
-} as const
+}
 
 export function getPnlColorClass(pnl: number | null): string {
   if (pnl === null) return 'text-neutral-500'

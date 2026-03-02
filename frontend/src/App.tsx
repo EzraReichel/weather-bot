@@ -1,13 +1,33 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense, lazy } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { motion } from 'framer-motion'
 import { fetchDashboard, runScan, simulateTrade, startBot, stopBot } from './api'
 import { StatsCards } from './components/StatsCards'
 import { SignalsTable } from './components/SignalsTable'
 import { TradesTable } from './components/TradesTable'
 import { EquityChart } from './components/EquityChart'
 import { Terminal } from './components/Terminal'
+import { MicrostructurePanel } from './components/MicrostructurePanel'
+import { CalibrationPanel } from './components/CalibrationPanel'
+import { WeatherPanel } from './components/WeatherPanel'
+import { EdgeDistribution } from './components/EdgeDistribution'
 import { formatCountdown } from './utils'
-import type { BtcWindow, Microstructure, CalibrationSummary, WeatherForecast, WeatherSignal } from './types'
+import type { BtcWindow } from './types'
+
+const GlobeView = lazy(() => import('./components/GlobeView').then(m => ({ default: m.GlobeView })))
+
+function LiveClock() {
+  const [time, setTime] = useState(new Date())
+  useEffect(() => {
+    const interval = setInterval(() => setTime(new Date()), 1000)
+    return () => clearInterval(interval)
+  }, [])
+  return (
+    <span className="text-xs tabular-nums text-neutral-400">
+      {time.toLocaleTimeString('en-US', { hour12: false })}
+    </span>
+  )
+}
 
 function WindowPill({ window: w }: { window: BtcWindow }) {
   const [countdown, setCountdown] = useState(w.time_until_end)
@@ -20,7 +40,7 @@ function WindowPill({ window: w }: { window: BtcWindow }) {
   }, [w.time_until_end])
 
   return (
-    <div className={`flex items-center gap-2 px-2 py-1 border shrink-0 ${w.is_active ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-neutral-900'}`}>
+    <div className={`flex items-center gap-2 px-2 py-1 border shrink-0 ${w.is_active ? 'border-amber-500/30 bg-amber-500/5' : 'border-neutral-800 bg-neutral-900/50'}`}>
       {w.is_active && <span className="text-[9px] font-bold text-amber-400 uppercase">Live</span>}
       {w.is_upcoming && <span className="text-[9px] font-medium text-blue-400 uppercase">Next</span>}
       <span className="text-[10px] tabular-nums text-green-400">{(w.up_price * 100).toFixed(0)}c</span>
@@ -31,119 +51,21 @@ function WindowPill({ window: w }: { window: BtcWindow }) {
   )
 }
 
-function IndicatorBar({ label, value, min, max, color }: { label: string; value: number; min: number; max: number; color: string }) {
-  const range = max - min
-  const pct = Math.max(0, Math.min(100, ((value - min) / range) * 100))
-  return (
-    <div className="flex items-center gap-2">
-      <span className="text-[10px] text-neutral-500 w-8 shrink-0 uppercase">{label}</span>
-      <div className="flex-1 h-1.5 bg-neutral-800 relative">
-        <div className={`absolute top-0 left-0 h-full ${color}`} style={{ width: `${pct}%` }} />
-        {label === 'RSI' && (
-          <>
-            <div className="absolute top-0 h-full w-px bg-neutral-600" style={{ left: '30%' }} />
-            <div className="absolute top-0 h-full w-px bg-neutral-600" style={{ left: '70%' }} />
-          </>
-        )}
-      </div>
-      <span className={`text-[10px] tabular-nums w-12 text-right ${color.replace('bg-', 'text-').replace('/80', '')}`}>
-        {value.toFixed(label === 'Vol' ? 4 : 2)}{label === 'RSI' ? '' : '%'}
-      </span>
-    </div>
-  )
-}
+function RefreshBar({ interval }: { interval: number }) {
+  const [progress, setProgress] = useState(100)
 
-function MicroPanel({ micro }: { micro: Microstructure }) {
-  const rsiColor = micro.rsi < 30 ? 'bg-green-500/80' : micro.rsi > 70 ? 'bg-red-500/80' : 'bg-neutral-400/80'
-  const momColor = micro.momentum_5m >= 0 ? 'bg-green-500/80' : 'bg-red-500/80'
-  const vwapColor = micro.vwap_deviation >= 0 ? 'bg-green-500/80' : 'bg-red-500/80'
-  const smaColor = micro.sma_crossover >= 0 ? 'bg-green-500/80' : 'bg-red-500/80'
+  useEffect(() => {
+    setProgress(100)
+    const step = 100 / (interval / 1000)
+    const timer = setInterval(() => {
+      setProgress(p => Math.max(0, p - step))
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [interval])
 
   return (
-    <div className="space-y-1">
-      <IndicatorBar label="RSI" value={micro.rsi} min={0} max={100} color={rsiColor} />
-      <IndicatorBar label="Mom" value={micro.momentum_5m} min={-0.2} max={0.2} color={momColor} />
-      <IndicatorBar label="VWAP" value={micro.vwap_deviation} min={-0.2} max={0.2} color={vwapColor} />
-      <IndicatorBar label="SMA" value={micro.sma_crossover} min={-0.1} max={0.1} color={smaColor} />
-      <IndicatorBar label="Vol" value={micro.volatility} min={0} max={0.1} color="bg-blue-500/80" />
-      <div className="text-[9px] text-neutral-600 pt-0.5">
-        Source: {micro.source} | Mom1m: {micro.momentum_1m >= 0 ? '+' : ''}{micro.momentum_1m.toFixed(4)}% | Mom15m: {micro.momentum_15m >= 0 ? '+' : ''}{micro.momentum_15m.toFixed(4)}%
-      </div>
-    </div>
-  )
-}
-
-function CalibrationPanel({ calibration }: { calibration: CalibrationSummary }) {
-  const accuracyColor = calibration.accuracy >= 0.55 ? 'text-green-500' : calibration.accuracy < 0.50 ? 'text-red-500' : 'text-neutral-400'
-  const brierLabel = calibration.brier_score <= 0.20 ? 'Good' : calibration.brier_score <= 0.25 ? 'OK' : 'Poor'
-  const brierColor = calibration.brier_score <= 0.20 ? 'text-green-500' : calibration.brier_score <= 0.25 ? 'text-amber-500' : 'text-red-500'
-
-  return (
-    <div className="space-y-1 text-[10px]">
-      <div className="flex items-center justify-between">
-        <span className="text-neutral-500">Accuracy</span>
-        <span className={accuracyColor}>
-          {(calibration.accuracy * 100).toFixed(0)}% correct ({Math.round(calibration.accuracy * calibration.total_with_outcome)}/{calibration.total_with_outcome})
-        </span>
-      </div>
-      <div className="flex items-center justify-between">
-        <span className="text-neutral-500">Brier Score</span>
-        <span className={brierColor}>
-          {calibration.brier_score.toFixed(3)} ({brierLabel})
-        </span>
-      </div>
-      <div className="flex items-center justify-between">
-        <span className="text-neutral-500">Edge Reality</span>
-        <span className="text-neutral-300">
-          Pred: {(calibration.avg_predicted_edge * 100).toFixed(1)}% | Actual: <span className={calibration.avg_actual_edge >= 0 ? 'text-green-500' : 'text-red-500'}>{(calibration.avg_actual_edge * 100).toFixed(1)}%</span>
-        </span>
-      </div>
-      <div className="text-[9px] text-neutral-600">
-        {calibration.total_signals} signals tracked, {calibration.total_with_outcome} settled
-      </div>
-    </div>
-  )
-}
-
-function WeatherPanel({ forecasts, signals }: { forecasts: WeatherForecast[]; signals: WeatherSignal[] }) {
-  const actionableWx = signals.filter(s => s.actionable)
-
-  return (
-    <div className="space-y-1.5 text-[10px]">
-      {forecasts.length === 0 && signals.length === 0 && (
-        <div className="text-neutral-600">No weather data yet</div>
-      )}
-      {forecasts.map(f => (
-        <div key={f.city_key} className="flex items-center justify-between">
-          <span className="text-neutral-400">{f.city_name}</span>
-          <div className="flex items-center gap-2">
-            <span className="tabular-nums text-neutral-300">
-              H:{f.mean_high.toFixed(0)}F<span className="text-neutral-600">+/-{f.std_high.toFixed(0)}</span>
-            </span>
-            <span className="tabular-nums text-neutral-300">
-              L:{f.mean_low.toFixed(0)}F<span className="text-neutral-600">+/-{f.std_low.toFixed(0)}</span>
-            </span>
-            <span className={`tabular-nums ${f.ensemble_agreement > 0.7 ? 'text-green-500' : 'text-amber-500'}`}>
-              {(f.ensemble_agreement * 100).toFixed(0)}%
-            </span>
-          </div>
-        </div>
-      ))}
-      {actionableWx.length > 0 && (
-        <div className="pt-1 border-t border-neutral-800">
-          <div className="text-[9px] text-amber-500 mb-1">{actionableWx.length} actionable signal{actionableWx.length !== 1 ? 's' : ''}</div>
-          {actionableWx.slice(0, 3).map((s, i) => (
-            <div key={i} className="flex items-center justify-between text-[9px]">
-              <span className="text-neutral-400 truncate max-w-[120px]">
-                {s.city_name} {s.metric} {s.direction} {s.threshold_f}F
-              </span>
-              <span className={`tabular-nums ${s.edge > 0 ? 'text-green-500' : 'text-red-500'}`}>
-                {(s.edge * 100).toFixed(1)}%
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
+    <div className="refresh-bar w-16">
+      <div className="refresh-fill" style={{ width: `${progress}%` }} />
     </div>
   )
 }
@@ -197,17 +119,17 @@ function App() {
   const equityCurve = data?.equity_curve ?? []
   const calibration = data?.calibration ?? null
 
-  const actionableCount = activeSignals.filter(s => s.actionable).length
+  const actionableCount = activeSignals.filter(s => s.actionable).length + weatherSignals.filter(s => s.actionable).length
 
   if (isLoading) {
     return (
       <div className="h-screen bg-black flex items-center justify-center">
         <div className="text-center">
           <div className="relative w-10 h-10 mx-auto mb-4">
-            <div className="absolute inset-0 border-2 border-neutral-800 rounded-full"></div>
-            <div className="absolute inset-0 border-2 border-transparent border-t-orange-500 rounded-full animate-spin"></div>
+            <div className="absolute inset-0 border-2 border-neutral-800 rounded-full" />
+            <div className="absolute inset-0 border-2 border-transparent border-t-green-500 rounded-full animate-spin" />
           </div>
-          <div className="text-xs text-neutral-400 uppercase tracking-wider">Connecting...</div>
+          <div className="text-[10px] text-neutral-500 uppercase tracking-widest font-mono">Initializing</div>
         </div>
       </div>
     )
@@ -217,7 +139,7 @@ function App() {
     return (
       <div className="h-screen bg-black flex items-center justify-center">
         <div className="text-center">
-          <div className="text-red-500 text-xs uppercase mb-2">Connection Error</div>
+          <div className="text-red-500 text-xs uppercase mb-2 tracking-wider">Connection Error</div>
           <button
             onClick={() => refetch()}
             className="px-3 py-1.5 bg-neutral-900 border border-neutral-700 text-neutral-300 text-xs uppercase tracking-wider"
@@ -231,18 +153,26 @@ function App() {
 
   return (
     <div className="h-screen bg-black text-neutral-200 flex flex-col overflow-hidden">
-      {/* Top bar */}
-      <header className="shrink-0 border-b border-neutral-800 px-3 py-1.5 flex items-center gap-4">
+      {/* ===== HEADER ===== */}
+      <motion.header
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="shrink-0 border-b border-neutral-800 px-3 py-1.5 flex items-center gap-4 relative"
+      >
+        <div className="scan-line" />
+
         <div className="flex items-center gap-2 shrink-0">
-          <h1 className="text-xs font-semibold text-neutral-100 uppercase tracking-wider whitespace-nowrap">Trading Bot</h1>
-          <span className={`px-1.5 py-0.5 text-[9px] font-medium uppercase ${
+          <h1 className="text-xs font-bold text-neutral-100 uppercase tracking-widest whitespace-nowrap font-mono">
+            TRADING TERMINAL
+          </h1>
+          <span className={`px-1.5 py-0.5 text-[9px] font-bold uppercase ${
             stats.is_running
               ? 'bg-green-500/10 text-green-500 border border-green-500/20'
               : 'bg-neutral-800 text-neutral-500 border border-neutral-700'
           }`}>
             {stats.is_running ? 'Live' : 'Idle'}
           </span>
-          <span className="px-1.5 py-0.5 text-[9px] font-medium uppercase bg-orange-500/10 text-orange-400 border border-orange-500/20">
+          <span className="px-1.5 py-0.5 text-[9px] font-bold uppercase bg-amber-500/10 text-amber-400 border border-amber-500/20">
             Sim
           </span>
         </div>
@@ -262,81 +192,67 @@ function App() {
 
         <StatsCards stats={stats} />
 
-        <button
-          onClick={() => scanMutation.mutate()}
-          disabled={scanMutation.isPending}
-          className="px-2.5 py-1 bg-neutral-800 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 whitespace-nowrap shrink-0"
-        >
-          {scanMutation.isPending ? 'Scanning...' : 'Scan'}
-        </button>
-      </header>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() => scanMutation.mutate()}
+            disabled={scanMutation.isPending}
+            className="px-2.5 py-1 bg-neutral-900 border border-neutral-700 hover:border-neutral-600 text-neutral-300 text-[10px] uppercase tracking-wider transition-colors disabled:opacity-50 whitespace-nowrap"
+          >
+            {scanMutation.isPending ? 'Scanning...' : 'Scan'}
+          </button>
+          <LiveClock />
+        </div>
+      </motion.header>
 
-      {/* Windows strip */}
-      <div className="shrink-0 border-b border-neutral-800 px-3 py-1 flex items-center gap-1.5 overflow-x-auto">
-        <span className="text-[10px] text-neutral-600 uppercase tracking-wider shrink-0 mr-1">Windows</span>
-        {windows.length > 0 ? (
-          windows.slice(0, 8).map(w => (
-            <WindowPill key={w.slug} window={w} />
-          ))
-        ) : (
-          <span className="text-[10px] text-neutral-600">No active windows</span>
-        )}
-      </div>
+      {/* ===== MAIN GRID ===== */}
+      <div className="flex-1 min-h-0 grid grid-cols-[300px_1fr_340px] grid-rows-[1fr] gap-0">
 
-      {/* Main content: 3 columns */}
-      <div className="flex-1 min-h-0 grid grid-cols-[minmax(280px,1fr),minmax(320px,1.2fr),minmax(320px,1.2fr)] gap-0">
-        {/* Col 1: Indicators + Chart + Terminal */}
-        <div className="flex flex-col border-r border-neutral-800 min-h-0">
-          {/* Microstructure indicators */}
+        {/* ===== LEFT COLUMN ===== */}
+        <div className="flex flex-col border-r border-neutral-800 min-h-0 overflow-hidden">
+          {/* Microstructure */}
           {micro && (
-            <div className="shrink-0 border-b border-neutral-800 px-2 py-2">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Indicators</span>
-                <span className="text-[9px] text-neutral-600">{micro.source}</span>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="shrink-0 border-b border-neutral-800 px-2 py-2"
+            >
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Microstructure</span>
+                <span className="text-[9px] text-neutral-600 tabular-nums">{micro.source}</span>
               </div>
-              <MicroPanel micro={micro} />
-            </div>
+              <MicrostructurePanel micro={micro} />
+            </motion.div>
           )}
 
           {/* Equity chart */}
-          <div className="flex flex-col border-b border-neutral-800" style={{ height: micro ? '30%' : '45%' }}>
+          <div className="border-b border-neutral-800" style={{ height: '28%', minHeight: '120px' }}>
             <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Performance</span>
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Equity</span>
               <span className={`text-[10px] tabular-nums ${stats.total_pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
                 {stats.total_pnl >= 0 ? '+' : ''}${stats.total_pnl.toFixed(0)}
               </span>
             </div>
-            <div className="flex-1 p-2 min-h-0">
-              <EquityChart
-                data={equityCurve}
-                initialBankroll={stats.bankroll - stats.total_pnl}
-              />
+            <div className="h-[calc(100%-24px)] p-1">
+              <EquityChart data={equityCurve} initialBankroll={stats.bankroll - stats.total_pnl} />
             </div>
           </div>
 
           {/* Calibration */}
           {calibration && calibration.total_with_outcome > 0 && (
-            <div className="shrink-0 border-b border-neutral-800 px-2 py-2">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="shrink-0 border-b border-neutral-800 px-2 py-2"
+            >
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Calibration</span>
-                <span className="text-[9px] text-neutral-600">{calibration.total_with_outcome} settled</span>
+                <span className="text-[9px] text-neutral-600 tabular-nums">{calibration.total_with_outcome} settled</span>
               </div>
               <CalibrationPanel calibration={calibration} />
-            </div>
+            </motion.div>
           )}
 
-          {/* Weather forecasts */}
-          {(weatherForecasts.length > 0 || weatherSignals.length > 0) && (
-            <div className="shrink-0 border-b border-neutral-800 px-2 py-2">
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather</span>
-                <span className="px-1 py-0.5 text-[8px] font-medium uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
-              </div>
-              <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} />
-            </div>
-          )}
-
-          {/* Terminal */}
+          {/* Terminal fills remaining */}
           <div className="flex-1 min-h-0">
             <Terminal
               isRunning={stats.is_running}
@@ -349,44 +265,118 @@ function App() {
           </div>
         </div>
 
-        {/* Col 2: Signals */}
-        <div className="flex flex-col border-r border-neutral-800 min-h-0">
-          <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-            <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-neutral-600">{activeSignals.length} BTC</span>
-              {weatherSignals.length > 0 && (
-                <span className="text-[10px] text-cyan-400">{weatherSignals.length} WX</span>
-              )}
-              <span className="px-1.5 py-0.5 text-[9px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20">
-                {actionableCount + weatherSignals.filter(s => s.actionable).length} actionable
-              </span>
+        {/* ===== CENTER COLUMN ===== */}
+        <div className="flex flex-col min-h-0 border-r border-neutral-800">
+          {/* Globe - top 60% */}
+          <div className="relative" style={{ height: '58%' }}>
+            <div className="absolute inset-0">
+              <Suspense fallback={
+                <div className="w-full h-full flex items-center justify-center bg-black">
+                  <span className="text-[10px] text-neutral-600 uppercase tracking-wider">Loading Globe...</span>
+                </div>
+              }>
+                <GlobeView forecasts={weatherForecasts} signals={weatherSignals} />
+              </Suspense>
+            </div>
+            {/* Globe overlay: actionable count */}
+            <div className="absolute top-2 left-2 z-10">
+              <div className="px-2 py-1 bg-black/80 border border-neutral-800 text-[10px]">
+                <span className="text-neutral-500 uppercase tracking-wider mr-2">Markets</span>
+                <span className="text-amber-500 tabular-nums">{actionableCount} actionable</span>
+              </div>
             </div>
           </div>
-          <div className="flex-1 overflow-y-auto min-h-0">
-            <SignalsTable
-              signals={activeSignals}
-              onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
-              isSimulating={tradeMutation.isPending}
-            />
+
+          {/* Bottom panels - 3 side by side */}
+          <div className="flex-1 min-h-0 grid grid-cols-3 border-t border-neutral-800">
+            {/* Edge Distribution */}
+            <div className="border-r border-neutral-800 flex flex-col min-h-0">
+              <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Edge Distribution</span>
+              </div>
+              <div className="flex-1 min-h-0 p-1">
+                <EdgeDistribution btcSignals={activeSignals} weatherSignals={weatherSignals} />
+              </div>
+            </div>
+
+            {/* BTC Windows */}
+            <div className="border-r border-neutral-800 flex flex-col min-h-0">
+              <div className="px-2 py-1 border-b border-neutral-800 shrink-0">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">BTC Windows</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto p-1 space-y-1">
+                {windows.length > 0 ? (
+                  windows.slice(0, 10).map(w => (
+                    <WindowPill key={w.slug} window={w} />
+                  ))
+                ) : (
+                  <div className="text-[10px] text-neutral-600 p-2">No active windows</div>
+                )}
+              </div>
+            </div>
+
+            {/* Weather Forecasts */}
+            <div className="flex flex-col min-h-0">
+              <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
+                <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Weather</span>
+                <span className="px-1 py-0.5 text-[8px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">WX</span>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto">
+                <WeatherPanel forecasts={weatherForecasts} signals={weatherSignals} />
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Col 3: Trades */}
-        <div className="flex flex-col min-h-0">
-          <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
-            <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
-            <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
+        {/* ===== RIGHT COLUMN ===== */}
+        <div className="flex flex-col min-h-0 overflow-hidden">
+          {/* Signals - top portion */}
+          <div className="flex flex-col min-h-0" style={{ height: '50%' }}>
+            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Signals</span>
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-amber-400 tabular-nums">{activeSignals.length} BTC</span>
+                {weatherSignals.length > 0 && (
+                  <span className="text-[10px] text-cyan-400 tabular-nums">{weatherSignals.length} WX</span>
+                )}
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto min-h-0">
+              <SignalsTable
+                signals={activeSignals}
+                weatherSignals={weatherSignals}
+                onSimulateTrade={(ticker) => tradeMutation.mutate(ticker)}
+                isSimulating={tradeMutation.isPending}
+              />
+            </div>
           </div>
-          <div className="flex-1 overflow-y-auto min-h-0">
-            <TradesTable trades={recentTrades} />
+
+          {/* Trades */}
+          <div className="flex flex-col min-h-0 border-t border-neutral-800" style={{ height: '50%' }}>
+            <div className="px-2 py-1 border-b border-neutral-800 flex items-center justify-between shrink-0">
+              <span className="text-[10px] text-neutral-500 uppercase tracking-wider">Trades</span>
+              <span className="text-[10px] text-neutral-600 tabular-nums">{recentTrades.length}</span>
+            </div>
+            <div className="flex-1 overflow-y-auto min-h-0">
+              <TradesTable trades={recentTrades} />
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Footer */}
-      <footer className="shrink-0 border-t border-neutral-800 px-3 py-0.5 text-center text-neutral-700 text-[10px]">
-        Binance/Coinbase + Open-Meteo + Polymarket | BTC 5-min + Weather Temp | Simulation
+      {/* ===== FOOTER ===== */}
+      <footer className="shrink-0 border-t border-neutral-800 px-3 py-0.5 flex items-center justify-between">
+        <span className="text-[10px] text-neutral-700 font-mono">
+          Binance/Coinbase | Open-Meteo | Polymarket + Kalshi
+        </span>
+        <div className="flex items-center gap-3">
+          <RefreshBar interval={10000} />
+          <span className="text-[10px] text-neutral-700 font-mono">BTC 5-min + Weather Temp</span>
+          <div className="flex items-center gap-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
+            <span className="text-[10px] text-neutral-600 font-mono">Connected</span>
+          </div>
+        </div>
       </footer>
     </div>
   )

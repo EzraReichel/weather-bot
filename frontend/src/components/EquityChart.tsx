@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
   ReferenceLine
 } from 'recharts'
+import { motion } from 'framer-motion'
 import type { EquityPoint } from '../types'
 
 interface Props {
@@ -17,14 +18,13 @@ interface Props {
 
 const CustomTooltip = ({ active, payload, label }: any) => {
   if (!active || !payload || !payload.length) return null
-
   const value = payload[0].value
   const isPositive = value >= 0
 
   return (
-    <div className="bg-neutral-900 border border-neutral-800 p-3">
-      <p className="text-xs text-neutral-500 mb-1">{label}</p>
-      <p className={`text-lg font-semibold tabular-nums ${isPositive ? 'text-green-500' : 'text-red-500'}`}>
+    <div className="bg-[#0a0a0a] border border-neutral-800 px-2 py-1.5">
+      <p className="text-[10px] text-neutral-500 mb-0.5">{label}</p>
+      <p className={`text-sm font-semibold tabular-nums ${isPositive ? 'text-green-500' : 'text-red-500'}`}>
         {isPositive ? '+' : ''}${value.toFixed(2)}
       </p>
     </div>
@@ -41,7 +41,6 @@ export function EquityChart({ data, initialBankroll }: Props) {
     )
   }
 
-  // Add starting point
   const chartData = [
     { timestamp: 'Start', pnl: 0, bankroll: initialBankroll },
     ...data.map(d => ({
@@ -56,16 +55,23 @@ export function EquityChart({ data, initialBankroll }: Props) {
   const maxPnl = Math.max(0, ...data.map(d => d.pnl))
   const padding = Math.max(Math.abs(minPnl), Math.abs(maxPnl)) * 0.2
 
+  const gradientId = `equityGradient-${isPositive ? 'green' : 'red'}`
+
   return (
-    <div className="h-full">
+    <motion.div
+      className="h-full"
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.5 }}
+    >
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+        <AreaChart data={chartData} margin={{ top: 5, right: 5, left: -15, bottom: 0 }}>
           <defs>
-            <linearGradient id="colorPnl" x1="0" y1="0" x2="0" y2="1">
+            <linearGradient id={gradientId} x1="0" y1="0" x2="0" y2="1">
               <stop
                 offset="5%"
                 stopColor={isPositive ? '#22c55e' : '#ef4444'}
-                stopOpacity={0.2}
+                stopOpacity={0.25}
               />
               <stop
                 offset="95%"
@@ -75,48 +81,43 @@ export function EquityChart({ data, initialBankroll }: Props) {
             </linearGradient>
           </defs>
 
-          <CartesianGrid
-            strokeDasharray="3 3"
-            stroke="#1a1a1a"
-            vertical={false}
-          />
+          <CartesianGrid strokeDasharray="3 3" stroke="#1a1a1a" vertical={false} />
 
           <XAxis
             dataKey="timestamp"
             stroke="#525252"
-            fontSize={10}
+            fontSize={9}
             tickLine={false}
             axisLine={false}
-            dy={10}
+            dy={5}
+            fontFamily="JetBrains Mono"
           />
 
           <YAxis
             stroke="#525252"
-            fontSize={10}
+            fontSize={9}
             tickLine={false}
             axisLine={false}
             tickFormatter={(value) => `$${value}`}
             domain={[minPnl - padding, maxPnl + padding]}
-            dx={-10}
+            dx={-5}
+            fontFamily="JetBrains Mono"
           />
 
           <Tooltip content={<CustomTooltip />} />
 
-          <ReferenceLine
-            y={0}
-            stroke="#262626"
-            strokeDasharray="3 3"
-          />
+          <ReferenceLine y={0} stroke="#262626" strokeDasharray="3 3" />
 
           <Area
             type="monotone"
             dataKey="pnl"
             stroke={isPositive ? '#22c55e' : '#ef4444'}
             strokeWidth={1.5}
-            fill="url(#colorPnl)"
+            fill={`url(#${gradientId})`}
+            animationDuration={800}
           />
         </AreaChart>
       </ResponsiveContainer>
-    </div>
+    </motion.div>
   )
 }
