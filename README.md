@@ -4,6 +4,8 @@ A multi-strategy trading bot that identifies pricing inefficiencies in predictio
 
 ![Python](https://img.shields.io/badge/python-3.10+-blue) ![React](https://img.shields.io/badge/react-18+-61DAFB) ![TypeScript](https://img.shields.io/badge/typescript-5.0+-blue) ![License](https://img.shields.io/badge/license-MIT-green)
 
+![Dashboard](docs/dashboard.png)
+
 **100% free to run** - No paid APIs, no subscriptions. All data sources are free. Kalshi API key optional for Kalshi markets.
 
 ## Overview
@@ -235,13 +237,17 @@ kalshi-trading-bot/
 ├── frontend/
 │   ├── src/
 │   │   ├── components/
+│   │   │   ├── GlobeView.tsx        # 3D globe with city markers
+│   │   │   ├── EdgeDistribution.tsx # Edge distribution chart
+│   │   │   ├── MicrostructurePanel.tsx # RSI gauge + indicator meters
+│   │   │   ├── WeatherPanel.tsx     # Weather forecasts per city
+│   │   │   ├── CalibrationPanel.tsx # Prediction accuracy tracking
 │   │   │   ├── StatsCards.tsx       # Performance metrics
-│   │   │   ├── SignalsTable.tsx     # Trading signals (BTC)
+│   │   │   ├── SignalsTable.tsx     # BTC + Weather signals combined
 │   │   │   ├── TradesTable.tsx      # Trade history
 │   │   │   ├── EquityChart.tsx      # P&L chart
-│   │   │   ├── FilterBar.tsx        # Signal filters
 │   │   │   └── Terminal.tsx         # Event log + controls
-│   │   ├── App.tsx                  # Dashboard (BTC + weather panels)
+│   │   ├── App.tsx                  # 3-column grid dashboard
 │   │   ├── api.ts                   # API client
 │   │   └── types.ts                 # TypeScript interfaces
 │   └── package.json
