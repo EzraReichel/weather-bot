@@ -35,6 +35,9 @@ CITY_NAMES: Dict[str, str] = {
     "denver":      "Denver",
 }
 
+MIN_ASK_SIZE = 50       # minimum contracts on the yes ask
+MIN_VOLUME_24H = 1000   # minimum 24h volume ($1 face value per contract)
+
 MONTH_ABBR = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
@@ -132,6 +135,7 @@ async def fetch_kalshi_weather_markets(
     today = date.today()
     skipped_no_price = 0
     skipped_bracket = 0
+    skipped_low_liquidity = 0
 
     for series_ticker, city_key, metric in WEATHER_SERIES:
         if city_keys and city_key not in city_keys:
@@ -203,6 +207,24 @@ async def fetch_kalshi_weather_markets(
                     if yes_price > 0.97 or yes_price < 0.03:
                         continue
 
+                    # Liquidity filters — skip ghost markets with stale prices
+                    yes_ask_size = float(m.get("yes_ask_size_fp") or 0)
+                    volume_24h = float(m.get("volume_24h_fp") or 0)
+
+                    if yes_ask_size < MIN_ASK_SIZE:
+                        logger.info(
+                            f"LIQUIDITY SKIP {ticker}: ask_size={yes_ask_size:.0f} < {MIN_ASK_SIZE}"
+                        )
+                        skipped_low_liquidity += 1
+                        continue
+
+                    if volume_24h < MIN_VOLUME_24H:
+                        logger.info(
+                            f"LIQUIDITY SKIP {ticker}: volume_24h={volume_24h:.0f} < {MIN_VOLUME_24H}"
+                        )
+                        skipped_low_liquidity += 1
+                        continue
+
                     markets.append(WeatherMarket(
                         slug=ticker,
                         market_id=ticker,
@@ -228,6 +250,7 @@ async def fetch_kalshi_weather_markets(
 
     logger.info(
         f"Found {len(markets)} tradeable Kalshi weather markets "
-        f"(skipped {skipped_bracket} brackets, {skipped_no_price} with no price)"
+        f"(skipped {skipped_bracket} brackets, {skipped_no_price} no-price, "
+        f"{skipped_low_liquidity} low-liquidity)"
     )
     return markets
