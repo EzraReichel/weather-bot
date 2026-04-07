@@ -85,6 +85,10 @@ async def on_startup():
     finally:
         db.close()
 
+    if settings.DRY_RUN:
+        logger.info("=" * 60)
+        logger.info("🔒 DRY RUN MODE — no real trades will be placed")
+        logger.info("=" * 60)
     logger.info(f"Simulation mode: {settings.SIMULATION_MODE}")
     logger.info(f"Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}  |  "
                 f"Kelly: {settings.KELLY_FRACTION:.0%}  |  "

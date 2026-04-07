@@ -40,6 +40,16 @@ async def weather_scan_job():
             f"({elapsed:.1f}s)"
         )
 
+        # DRY RUN: log what WOULD be traded but don't place orders
+        if settings.DRY_RUN and actionable:
+            logger.info("🔒 DRY RUN — would place the following trades:")
+            for s in actionable:
+                logger.info(
+                    f"  WOULD TRADE: {s.market.market_id}  {s.direction.upper()}  "
+                    f"edge={s.edge:+.1%}  model={s.model_probability:.0%}  "
+                    f"market={s.market_probability:.0%}  size=${s.suggested_size:.0f}"
+                )
+
         # Send Discord alerts for new actionable signals
         for signal in actionable:
             ticker = signal.market.market_id

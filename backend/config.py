@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     WEATHER_MAX_TRADE_SIZE: float = 100.0
     WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
 
+    # Dry run — default TRUE so live trading requires explicit opt-in
+    DRY_RUN: bool = True
+
     # Health check
     PORT: int = 8080
 
