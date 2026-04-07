@@ -17,9 +17,9 @@ logger = logging.getLogger("weatherbot")
 
 scheduler: Optional[AsyncIOScheduler] = None
 
-# Track which signal tickers we've already alerted on in this session
-# to avoid spamming repeated alerts
-_alerted_tickers: set = set()
+# Track last alert time per ticker to enforce 6-hour dedup window
+_alerted_tickers: dict = {}   # ticker -> datetime of last alert
+_ALERT_DEDUP_HOURS = 6
 
 
 async def weather_scan_job():
@@ -50,15 +50,18 @@ async def weather_scan_job():
             # Always log paper trade (deduplication is inside log_paper_trade)
             trade = log_paper_trade(signal)
 
-            if ticker not in _alerted_tickers:
+            # 6-hour Discord dedup window
+            last_alerted = _alerted_tickers.get(ticker)
+            alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
+            already_alerted = last_alerted is not None and last_alerted > alert_cutoff
+
+            if not already_alerted:
                 try:
                     if trade is not None:
-                        # New paper trade — send paper trade alert
                         send_paper_trade_alert(signal, trade)
                     else:
-                        # Already logged today — send regular signal alert
                         send_signal_alert(signal)
-                    _alerted_tickers.add(ticker)
+                    _alerted_tickers[ticker] = datetime.utcnow()
                 except Exception as e:
                     logger.error(f"Failed to send Discord alert for {ticker}: {e}")
 

@@ -3,21 +3,8 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
-import httpx
-
 from backend.config import settings
 from backend.models.paper_trade import PaperSessionLocal, PaperTrade, init_paper_db
-
-logger = logging.getLogger("weatherbot")
-
-# ── NWS station IDs per city ─────────────────────────────────────────────────
-NWS_STATIONS = {
-    "nyc":         "KNYC",   # Central Park
-    "chicago":     "KORD",   # O'Hare
-    "miami":       "KMIA",   # Miami Intl
-    "los_angeles": "KLAX",   # LAX
-    "denver":      "KDEN",   # Denver Intl
-}
 
 # ── DB init guard ─────────────────────────────────────────────────────────────
 _db_initialized = False
@@ -48,15 +35,13 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
 
     db = PaperSessionLocal()
     try:
-        # Deduplicate: one paper trade per ticker per calendar day
-        today_str = date.today().isoformat()
+        # Deduplicate: skip if any unresolved trade already exists for this ticker
         existing = db.query(PaperTrade).filter(
             PaperTrade.ticker == market.market_id,
-            PaperTrade.created_at >= datetime.utcnow().replace(
-                hour=0, minute=0, second=0, microsecond=0
-            ),
+            PaperTrade.resolved == False,
         ).first()
         if existing:
+            logger.debug(f"Duplicate signal skipped: {market.market_id} (already pending)")
             return None
 
         pt = PaperTrade(
@@ -98,47 +83,15 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
 
 async def _fetch_nws_daily_temp(city_key: str, target_date: date, metric: str) -> Optional[float]:
     """
-    Fetch the observed daily HIGH or LOW temperature (°F) from NWS for a given city/date.
-    Uses the NWS observations endpoint, reads all hourly readings for the day,
-    and returns max (high) or min (low).
+    Fetch observed daily HIGH or LOW temperature (°F) from NWS.
+    Delegates to weather.py's fetch_nws_observed_temperature which uses the
+    exact station coordinates Kalshi uses for settlement.
     """
-    station = NWS_STATIONS.get(city_key)
-    if not station:
-        logger.warning(f"No NWS station configured for city: {city_key}")
+    from backend.data.weather import fetch_nws_observed_temperature
+    obs = await fetch_nws_observed_temperature(city_key, target_date)
+    if obs is None:
         return None
-
-    start = f"{target_date}T00:00:00+00:00"
-    end   = f"{target_date}T23:59:59+00:00"
-    url   = f"https://api.weather.gov/stations/{station}/observations"
-    params = {"start": start, "end": end}
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0, headers={"User-Agent": "KalshiWeatherBot/1.0"}) as client:
-            resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-        temps_c = []
-        for feature in data.get("features", []):
-            props = feature.get("properties", {})
-            t = props.get("temperature", {})
-            val = t.get("value")
-            if val is not None:
-                temps_c.append(float(val))
-
-        if not temps_c:
-            logger.warning(f"NWS returned no temperature readings for {station} on {target_date}")
-            return None
-
-        # Convert Celsius → Fahrenheit
-        temps_f = [(c * 9 / 5) + 32 for c in temps_c]
-        result = max(temps_f) if metric == "high" else min(temps_f)
-        logger.info(f"NWS {station} {target_date}: {len(temps_f)} readings, {metric}={result:.1f}°F")
-        return result
-
-    except Exception as e:
-        logger.warning(f"NWS fetch failed for {station} {target_date}: {e}")
-        return None
+    return obs.get(metric)
 
 
 # ── Settlement ────────────────────────────────────────────────────────────────
