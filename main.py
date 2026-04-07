@@ -2,17 +2,15 @@
 """
 Kalshi Weather Arb Bot — single-process worker.
 
-Starts the async scan loop and a lightweight health-check HTTP server.
-Designed to run as a Railway worker.
+Serves the Mission Control UI at / and runs the scan loop in the background.
+Railway health check hits GET /health → 200.
 """
 import asyncio
 import logging
 import os
 import signal
 import sys
-from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from pathlib import Path
 
 # ── Logging setup ────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -24,40 +22,43 @@ logging.basicConfig(
 logger = logging.getLogger("weatherbot")
 
 # ── Imports ──────────────────────────────────────────────────────────────────
+from fastapi import FastAPI
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+
 from backend.config import settings
 from backend.models.database import init_db, SessionLocal, BotState
 
+# ── FastAPI app ───────────────────────────────────────────────────────────────
+app = FastAPI(docs_url=None, redoc_url=None)
 
-# ── Health check HTTP server (Railway keeps-alive) ───────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"status":"ok"}')
-
-    def log_message(self, format, *args):
-        pass  # Suppress HTTP access logs
+FRONTEND_DIR = Path(__file__).parent / "frontend"
 
 
-def start_health_server(port: int):
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logger.info(f"Health check listening on :{port}")
+@app.get("/health")
+async def health():
+    return JSONResponse({"status": "ok"})
 
 
-# ── Main async loop ───────────────────────────────────────────────────────────
-async def main():
+@app.get("/app.jsx")
+async def serve_jsx():
+    """Serve the JSX component with correct MIME type for Babel standalone."""
+    return FileResponse(FRONTEND_DIR / "app.jsx", media_type="application/javascript")
+
+
+@app.get("/", include_in_schema=False)
+async def serve_ui():
+    return FileResponse(FRONTEND_DIR / "index.html")
+
+
+# ── Startup / shutdown hooks ─────────────────────────────────────────────────
+@app.on_event("startup")
+async def on_startup():
     logger.info("=" * 60)
     logger.info("Kalshi Weather Arb Bot")
     logger.info("=" * 60)
 
-    # Health check
-    start_health_server(settings.PORT)
-
-    # Init DB and bot state
-    logger.info("Initializing database...")
     init_db()
 
     db = SessionLocal()
@@ -73,49 +74,36 @@ async def main():
             )
             db.add(state)
             db.commit()
-            logger.info(f"New bot state created — bankroll ${settings.INITIAL_BANKROLL:,.2f}")
+            logger.info(f"New bot state — bankroll ${settings.INITIAL_BANKROLL:,.2f}")
         else:
             state.is_running = True
             db.commit()
             logger.info(
-                f"Loaded bot state — bankroll ${state.bankroll:,.2f}  "
+                f"Loaded state — bankroll ${state.bankroll:,.2f}  "
                 f"P&L ${state.total_pnl:+,.2f}  trades {state.total_trades}"
             )
     finally:
         db.close()
 
     logger.info(f"Simulation mode: {settings.SIMULATION_MODE}")
-    logger.info(f"Min edge threshold: {settings.MIN_EDGE_THRESHOLD:.0%}")
-    logger.info(f"Kelly fraction: {settings.KELLY_FRACTION:.0%}")
-    logger.info(f"Kalshi fee rate: {settings.KALSHI_FEE_RATE:.0%}")
-    logger.info(f"Scan interval: {settings.SCAN_INTERVAL_SECONDS}s")
-    logger.info(f"Cities: {settings.WEATHER_CITIES}")
+    logger.info(f"Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}  |  "
+                f"Kelly: {settings.KELLY_FRACTION:.0%}  |  "
+                f"Fee rate: {settings.KALSHI_FEE_RATE:.0%}  |  "
+                f"Scan: {settings.SCAN_INTERVAL_SECONDS}s")
 
-    # Discord startup notification
     try:
         from backend.notifications.discord import send_startup_message
         send_startup_message(settings.SIMULATION_MODE, settings.INITIAL_BANKROLL)
     except Exception as e:
-        logger.warning(f"Failed to send startup Discord message: {e}")
+        logger.warning(f"Discord startup ping failed: {e}")
 
-    # Start scheduler (handles scan, settlement, daily summary)
     from backend.core.scheduler import start_scheduler
     start_scheduler()
+    logger.info(f"Mission Control UI at http://0.0.0.0:{settings.PORT}")
 
-    logger.info("Bot is running. Press Ctrl+C to stop.")
 
-    # Keep alive — handle SIGTERM from Railway gracefully
-    stop_event = asyncio.Event()
-
-    def _shutdown(sig, frame):
-        logger.info(f"Received signal {sig}, shutting down...")
-        stop_event.set()
-
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
-
-    await stop_event.wait()
-
+@app.on_event("shutdown")
+async def on_shutdown():
     from backend.core.scheduler import stop_scheduler
     stop_scheduler()
 
@@ -127,9 +115,15 @@ async def main():
             db.commit()
     finally:
         db.close()
-
     logger.info("Shutdown complete.")
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    asyncio.run(main())
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=settings.PORT,
+        log_level="warning",   # uvicorn access logs off; our logger handles it
+        reload=False,
+    )
