@@ -40,25 +40,30 @@ async def weather_scan_job():
             f"({elapsed:.1f}s)"
         )
 
-        # DRY RUN: log what WOULD be traded but don't place orders
-        if settings.DRY_RUN and actionable:
-            logger.info("🔒 DRY RUN — would place the following trades:")
-            for s in actionable:
-                logger.info(
-                    f"  WOULD TRADE: {s.market.market_id}  {s.direction.upper()}  "
-                    f"edge={s.edge:+.1%}  model={s.model_probability:.0%}  "
-                    f"market={s.market_probability:.0%}  size=${s.suggested_size:.0f}"
-                )
+        # Log paper trades and send Discord alerts for new actionable signals
+        from backend.core.paper_trading import log_paper_trade
+        from backend.notifications.discord import send_paper_trade_alert
 
-        # Send Discord alerts for new actionable signals
         for signal in actionable:
             ticker = signal.market.market_id
+
+            # Always log paper trade (deduplication is inside log_paper_trade)
+            trade = log_paper_trade(signal)
+
             if ticker not in _alerted_tickers:
                 try:
-                    send_signal_alert(signal)
+                    if trade is not None:
+                        # New paper trade — send paper trade alert
+                        send_paper_trade_alert(signal, trade)
+                    else:
+                        # Already logged today — send regular signal alert
+                        send_signal_alert(signal)
                     _alerted_tickers.add(ticker)
                 except Exception as e:
                     logger.error(f"Failed to send Discord alert for {ticker}: {e}")
+
+        if settings.DRY_RUN and actionable:
+            logger.info(f"🔒 DRY RUN — logged {len(actionable)} paper trade(s), no real orders placed")
 
         # Update bot state
         db = SessionLocal()
@@ -106,6 +111,44 @@ async def settlement_job():
 
     except Exception as e:
         logger.error(f"Settlement error: {e}", exc_info=True)
+
+
+async def paper_settlement_job():
+    """Hourly: settle paper trades whose resolution date has passed."""
+    try:
+        from backend.core.paper_trading import settle_paper_trades
+        settled = await settle_paper_trades()
+        if settled:
+            wins   = sum(1 for t in settled if t.result == "win")
+            losses = sum(1 for t in settled if t.result == "loss")
+            pnl    = sum(t.pnl for t in settled if t.pnl is not None)
+            logger.info(
+                f"Paper trades settled: {len(settled)} ({wins}W/{losses}L)  P&L ${pnl:+.2f}"
+            )
+    except Exception as e:
+        logger.error(f"Paper settlement error: {e}", exc_info=True)
+
+
+async def paper_daily_summary_job():
+    """Send paper trading daily summary to Discord at 11 PM ET (04:00 UTC next day)."""
+    try:
+        from backend.core.paper_trading import get_paper_stats, PaperSessionLocal, PaperTrade
+        from backend.notifications.discord import send_paper_daily_summary
+        from datetime import timezone
+
+        db = PaperSessionLocal()
+        try:
+            stats = get_paper_stats(db)
+            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+            resolved_today = [
+                t for t in stats["resolved_trades"]
+                if t.resolved_at and t.resolved_at >= today_start
+            ]
+            send_paper_daily_summary(stats, resolved_today)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.error(f"Paper daily summary error: {e}", exc_info=True)
 
 
 async def daily_summary_job():
@@ -176,11 +219,29 @@ def start_scheduler():
         max_instances=1,
     )
 
+    # Paper trade settlement every hour
+    scheduler.add_job(
+        paper_settlement_job,
+        IntervalTrigger(hours=1),
+        id="paper_settlement",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Daily summary at 11:55 PM UTC
     scheduler.add_job(
         daily_summary_job,
         CronTrigger(hour=23, minute=55),
         id="daily_summary",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Paper trading daily summary at 04:00 UTC (11 PM ET)
+    scheduler.add_job(
+        paper_daily_summary_job,
+        CronTrigger(hour=4, minute=0),
+        id="paper_daily_summary",
         replace_existing=True,
         max_instances=1,
     )

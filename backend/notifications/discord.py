@@ -131,6 +131,105 @@ def send_daily_summary(
     return success
 
 
+def send_paper_trade_alert(signal, trade) -> bool:
+    """
+    Send a Discord alert for a logged paper trade.
+    Prefixed with '📝 PAPER TRADE' so it's clearly not a real order.
+    """
+    if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    market = signal.market
+    color = COLOR_YELLOW if signal.low_confidence_flag else COLOR_GREEN
+    side = signal.direction.upper()
+    conf_pct = f"{signal.confidence:.0%}"
+    low_conf_note = "  ⚠️ Low Confidence" if signal.low_confidence_flag else ""
+
+    fields = [
+        {"name": "Ticker",       "value": f"`{market.market_id}`",              "inline": True},
+        {"name": "Side",         "value": f"**{side}**",                         "inline": True},
+        {"name": "Edge",         "value": f"**{signal.edge:+.1%}**",             "inline": True},
+        {"name": "Model Prob",   "value": f"{signal.model_probability:.1%}",     "inline": True},
+        {"name": "Market Price", "value": f"{signal.market_probability:.1%}",    "inline": True},
+        {"name": "Kelly Size",   "value": f"${signal.suggested_size:.0f}",       "inline": True},
+        {"name": "Contracts",    "value": str(trade.contracts),                  "inline": True},
+        {"name": "Entry Price",  "value": f"{trade.entry_price:.2%}",            "inline": True},
+        {"name": "Confidence",   "value": conf_pct + low_conf_note,              "inline": True},
+        {
+            "name": "Forecast",
+            "value": (
+                f"Mean: {signal.ensemble_mean:.1f}°F  |  "
+                f"Std: {signal.ensemble_std:.1f}°F  |  "
+                f"Members: {signal.ensemble_members}"
+            ),
+            "inline": False,
+        },
+    ]
+
+    embed = {
+        "title": f"📝 PAPER TRADE — {market.title}",
+        "description": (
+            f"{market.city_name} — {market.metric.upper()} temp "
+            f"**{market.direction}** {market.threshold_f:.0f}°F on {market.target_date}\n"
+            f"*This is a paper trade. No real order was placed.*"
+        ),
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "Kalshi Weather Arb Bot · Paper Trading"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    success = _post_embed(embed)
+    if success:
+        logger.info(f"Discord paper trade alert sent: {market.market_id} {side}")
+    return success
+
+
+def send_paper_daily_summary(stats: dict, resolved_today: list) -> bool:
+    """Send the paper trading daily summary at 11 PM ET."""
+    if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    pnl = stats["total_pnl"]
+    pnl_sign = "+" if pnl >= 0 else ""
+    color = COLOR_GREEN if pnl >= 0 else COLOR_RED
+    win_rate = (stats["wins"] / stats["resolved"] * 100) if stats["resolved"] > 0 else 0.0
+    brier_str = f"{stats['brier']:.3f}" if stats["brier"] is not None else "n/a"
+
+    # Resolved-today lines
+    resolved_lines = []
+    for t in resolved_today:
+        icon = "✅" if t.result == "win" else "❌"
+        resolved_lines.append(
+            f"{icon} `{t.ticker}` — actual {t.actual_temp:.1f}°F vs {t.threshold_f:.0f}°F  P&L ${t.pnl:+.2f}"
+        )
+    resolved_text = "\n".join(resolved_lines) if resolved_lines else "None today"
+
+    fields = [
+        {"name": "Total Paper Trades", "value": str(stats["total"]),        "inline": True},
+        {"name": "Resolved",           "value": str(stats["resolved"]),      "inline": True},
+        {"name": "Pending",            "value": str(stats["unresolved"]),    "inline": True},
+        {"name": "W/L Record",         "value": f"{stats['wins']}W / {stats['losses']}L  ({win_rate:.0f}%)", "inline": True},
+        {"name": "Running P&L",        "value": f"**{pnl_sign}${pnl:.2f}**","inline": True},
+        {"name": "Brier Score",        "value": brier_str,                   "inline": True},
+        {"name": "Avg Edge at Entry",  "value": f"{stats['avg_edge']:+.1%}", "inline": True},
+        {"name": "Resolved Today",     "value": resolved_text,               "inline": False},
+    ]
+
+    embed = {
+        "title": "📋 Paper Trading Daily Summary",
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "Kalshi Weather Arb Bot · Paper Trading"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    success = _post_embed(embed)
+    if success:
+        logger.info("Discord paper daily summary sent")
+    return success
+
+
 def send_startup_message(simulation_mode: bool, bankroll: float) -> bool:
     """Send a startup notification."""
     if not settings.DISCORD_WEBHOOK_URL:

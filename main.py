@@ -106,6 +106,10 @@ async def on_startup():
     except Exception as e:
         logger.warning(f"Discord startup ping failed: {e}")
 
+    from backend.models.paper_trade import init_paper_db
+    init_paper_db()
+    logger.info("Paper trading DB initialized — paper_trades.db")
+
     from backend.core.scheduler import start_scheduler
     start_scheduler()
     logger.info(f"Mission Control UI at http://0.0.0.0:{settings.PORT}")
