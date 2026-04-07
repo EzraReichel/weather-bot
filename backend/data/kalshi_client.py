@@ -1,6 +1,5 @@
 """Kalshi API client with RSA-PSS signature authentication."""
 import base64
-import hashlib
 import logging
 import time
 from pathlib import Path
@@ -12,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import padding
 
 from backend.config import settings
 
-logger = logging.getLogger("trading_bot")
+logger = logging.getLogger("weatherbot")
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
@@ -24,24 +23,30 @@ class KalshiClient:
         self._private_key = None
 
     def _load_private_key(self):
-        """Load RSA private key from file (lazy, cached)."""
+        """Load RSA private key from file or inline PEM (lazy, cached)."""
         if self._private_key is not None:
             return self._private_key
 
-        key_path = settings.KALSHI_PRIVATE_KEY_PATH
-        if not key_path:
-            raise ValueError("KALSHI_PRIVATE_KEY_PATH not configured")
+        # Prefer inline PEM (Railway-friendly)
+        if settings.KALSHI_PRIVATE_KEY_PEM:
+            pem_data = settings.KALSHI_PRIVATE_KEY_PEM.encode("utf-8")
+            # Replace literal \n with actual newlines (common env var issue)
+            if b"\\n" in pem_data:
+                pem_data = pem_data.replace(b"\\n", b"\n")
+        elif settings.KALSHI_PRIVATE_KEY_PATH:
+            pem_data = Path(settings.KALSHI_PRIVATE_KEY_PATH).expanduser().read_bytes()
+        else:
+            raise ValueError(
+                "Neither KALSHI_PRIVATE_KEY_PEM nor KALSHI_PRIVATE_KEY_PATH is configured"
+            )
 
-        pem_data = Path(key_path).expanduser().read_bytes()
         self._private_key = serialization.load_pem_private_key(pem_data, password=None)
         return self._private_key
 
     def _sign_request(self, method: str, path: str) -> Dict[str, str]:
         """
         Generate auth headers for a Kalshi API request.
-
         Signature = RSA-PSS-sign(timestamp_ms + METHOD + path)
-        where path = /trade-api/v2/... (no query params).
         """
         timestamp_ms = str(int(time.time() * 1000))
         message = f"{timestamp_ms}{method.upper()}{path}"
@@ -64,13 +69,7 @@ class KalshiClient:
         }
 
     async def get(self, path: str, params: Optional[Dict[str, Any]] = None) -> dict:
-        """
-        Authenticated GET request to Kalshi API.
-
-        Args:
-            path: API path after /trade-api/v2 (e.g., "/markets")
-            params: Query parameters (not included in signature)
-        """
+        """Authenticated GET request to Kalshi API."""
         full_path = f"/trade-api/v2{path}"
         url = f"{BASE_URL}{path}"
         headers = self._sign_request("GET", full_path)
@@ -95,4 +94,6 @@ class KalshiClient:
 
 def kalshi_credentials_present() -> bool:
     """Check if Kalshi API credentials are configured."""
-    return bool(settings.KALSHI_API_KEY_ID and settings.KALSHI_PRIVATE_KEY_PATH)
+    has_key = bool(settings.KALSHI_API_KEY_ID)
+    has_pem = bool(settings.KALSHI_PRIVATE_KEY_PEM or settings.KALSHI_PRIVATE_KEY_PATH)
+    return has_key and has_pem
