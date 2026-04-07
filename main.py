@@ -5,6 +5,11 @@ Kalshi Weather Arb Bot — single-process worker.
 Serves the Mission Control UI at / and runs the scan loop in the background.
 Railway health check hits GET /health → 200.
 """
+# Load .env BEFORE any backend imports so env vars are present when
+# pydantic-settings instantiates the Settings object.
+from dotenv import load_dotenv
+load_dotenv()
+
 import asyncio
 import logging
 import os

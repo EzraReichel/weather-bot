@@ -27,17 +27,34 @@ class KalshiClient:
         if self._private_key is not None:
             return self._private_key
 
-        # Prefer inline PEM (Railway-friendly)
-        if settings.KALSHI_PRIVATE_KEY_PEM:
+        # Prefer file path (local dev); fall back to inline PEM (Railway/production)
+        if settings.KALSHI_PRIVATE_KEY_PATH:
+            key_path = Path(settings.KALSHI_PRIVATE_KEY_PATH).expanduser()
+            if not key_path.exists():
+                raise FileNotFoundError(
+                    f"KALSHI_PRIVATE_KEY_PATH points to missing file: {key_path}"
+                )
+            pem_data = key_path.read_bytes()
+            logger.debug(f"Loaded PEM from file: {key_path}")
+        elif settings.KALSHI_PRIVATE_KEY_PEM:
             pem_data = settings.KALSHI_PRIVATE_KEY_PEM.encode("utf-8")
-            # Replace literal \n with actual newlines (common env var issue)
+            # Handle \n-escaped newlines (common when pasting into env vars)
             if b"\\n" in pem_data:
                 pem_data = pem_data.replace(b"\\n", b"\n")
-        elif settings.KALSHI_PRIVATE_KEY_PATH:
-            pem_data = Path(settings.KALSHI_PRIVATE_KEY_PATH).expanduser().read_bytes()
+            logger.debug("Loaded PEM from inline KALSHI_PRIVATE_KEY_PEM")
         else:
             raise ValueError(
-                "Neither KALSHI_PRIVATE_KEY_PEM nor KALSHI_PRIVATE_KEY_PATH is configured"
+                "No Kalshi private key configured.\n"
+                "  Local:  set KALSHI_PRIVATE_KEY_PATH=./kalshi_key.pem\n"
+                "  Deploy: set KALSHI_PRIVATE_KEY_PEM=<inline PEM string>"
+            )
+
+        # Sanity-check: should start with -----BEGIN
+        if not pem_data.lstrip().startswith(b"-----BEGIN"):
+            preview = pem_data[:40].decode("utf-8", errors="replace")
+            raise ValueError(
+                f"PEM data doesn't look right (first 40 chars): {preview!r}\n"
+                "Make sure it starts with '-----BEGIN RSA PRIVATE KEY-----' or similar."
             )
 
         self._private_key = serialization.load_pem_private_key(pem_data, password=None)
