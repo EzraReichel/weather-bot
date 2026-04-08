@@ -16,7 +16,7 @@ CITY_CONFIG: Dict[str, dict] = {
     # runs 5-8°F hotter than LAX, which would produce massive phantom edges.
     "nyc": {
         "name": "New York City",
-        "lat": 40.7128,   # KNYC — Central Park (matches Kalshi NYC settlement)
+        "lat": 40.7128,   # KNYC — Central Park
         "lon": -74.0060,
         "nws_station": "KNYC",
         "nws_office": "OKX",
@@ -24,7 +24,7 @@ CITY_CONFIG: Dict[str, dict] = {
     },
     "chicago": {
         "name": "Chicago",
-        "lat": 41.9742,   # KORD — O'Hare airport
+        "lat": 41.9742,   # KORD — O'Hare
         "lon": -87.9073,
         "nws_station": "KORD",
         "nws_office": "LOT",
@@ -32,7 +32,7 @@ CITY_CONFIG: Dict[str, dict] = {
     },
     "miami": {
         "name": "Miami",
-        "lat": 25.7959,   # KMIA — Miami International airport
+        "lat": 25.7959,   # KMIA — Miami Intl
         "lon": -80.2870,
         "nws_station": "KMIA",
         "nws_office": "MFL",
@@ -40,7 +40,7 @@ CITY_CONFIG: Dict[str, dict] = {
     },
     "los_angeles": {
         "name": "Los Angeles",
-        "lat": 33.9425,   # KLAX — LAX airport (coastal, ~5-8°F cooler than downtown)
+        "lat": 33.9425,   # KLAX — LAX airport
         "lon": -118.4081,
         "nws_station": "KLAX",
         "nws_office": "LOX",
@@ -48,11 +48,131 @@ CITY_CONFIG: Dict[str, dict] = {
     },
     "denver": {
         "name": "Denver",
-        "lat": 39.8561,   # KDEN — Denver International airport
+        "lat": 39.8561,   # KDEN — Denver Intl
         "lon": -104.6737,
         "nws_station": "KDEN",
         "nws_office": "BOU",
         "nws_gridpoint": "BOU/62,60",
+    },
+    "austin": {
+        "name": "Austin",
+        "lat": 30.1975,   # KAUS — Austin-Bergstrom Intl
+        "lon": -97.6664,
+        "nws_station": "KAUS",
+        "nws_office": "EWX",
+        "nws_gridpoint": "EWX/157,90",
+    },
+    "houston": {
+        "name": "Houston",
+        "lat": 29.9844,   # KIAH — George Bush Intercontinental
+        "lon": -95.3414,
+        "nws_station": "KIAH",
+        "nws_office": "HGX",
+        "nws_gridpoint": "HGX/65,99",
+    },
+    "boston": {
+        "name": "Boston",
+        "lat": 42.3606,   # KBOS — Logan Intl
+        "lon": -71.0106,
+        "nws_station": "KBOS",
+        "nws_office": "BOX",
+        "nws_gridpoint": "BOX/69,82",
+    },
+    "washington_dc": {
+        "name": "Washington DC",
+        "lat": 38.9531,   # KDCA — Reagan National
+        "lon": -77.4565,
+        "nws_station": "KDCA",
+        "nws_office": "LWX",
+        "nws_gridpoint": "LWX/97,70",
+    },
+    "phoenix": {
+        "name": "Phoenix",
+        "lat": 33.4373,   # KPHX — Phoenix Sky Harbor
+        "lon": -112.0078,
+        "nws_station": "KPHX",
+        "nws_office": "PSR",
+        "nws_gridpoint": "PSR/158,57",
+    },
+    "seattle": {
+        "name": "Seattle",
+        "lat": 47.4502,   # KSEA — Seattle-Tacoma Intl
+        "lon": -122.3088,
+        "nws_station": "KSEA",
+        "nws_office": "SEW",
+        "nws_gridpoint": "SEW/124,68",
+    },
+    "san_francisco": {
+        "name": "San Francisco",
+        "lat": 37.6213,   # KSFO — SFO airport
+        "lon": -122.3790,
+        "nws_station": "KSFO",
+        "nws_office": "MTR",
+        "nws_gridpoint": "MTR/84,82",
+    },
+    "atlanta": {
+        "name": "Atlanta",
+        "lat": 33.6407,   # KATL — Hartsfield-Jackson
+        "lon": -84.4277,
+        "nws_station": "KATL",
+        "nws_office": "FFC",
+        "nws_gridpoint": "FFC/52,57",
+    },
+    "dallas": {
+        "name": "Dallas",
+        "lat": 32.8998,   # KDFW — DFW airport
+        "lon": -97.0403,
+        "nws_station": "KDFW",
+        "nws_office": "FWD",
+        "nws_gridpoint": "FWD/99,80",
+    },
+    "las_vegas": {
+        "name": "Las Vegas",
+        "lat": 36.0840,   # KLAS — McCarran/Harry Reid Intl
+        "lon": -115.1537,
+        "nws_station": "KLAS",
+        "nws_office": "VEF",
+        "nws_gridpoint": "VEF/112,77",
+    },
+    "minneapolis": {
+        "name": "Minneapolis",
+        "lat": 44.8820,   # KMSP — Minneapolis-Saint Paul Intl
+        "lon": -93.2218,
+        "nws_station": "KMSP",
+        "nws_office": "MPX",
+        "nws_gridpoint": "MPX/107,70",
+    },
+    "new_orleans": {
+        "name": "New Orleans",
+        "lat": 29.9934,   # KMSY — Louis Armstrong Intl
+        "lon": -90.2580,
+        "nws_station": "KMSY",
+        "nws_office": "LIX",
+        "nws_gridpoint": "LIX/67,62",
+    },
+    "oklahoma_city": {
+        "name": "Oklahoma City",
+        "lat": 35.3931,   # KOKC — Will Rogers World Airport
+        "lon": -97.6007,
+        "nws_station": "KOKC",
+        "nws_office": "OUN",
+        "nws_gridpoint": "OUN/103,83",
+    },
+    "san_antonio": {
+        "name": "San Antonio",
+        "lat": 29.5337,   # KSAT — San Antonio Intl
+        "lon": -98.4698,
+        "nws_station": "KSAT",
+        "nws_office": "EWX",
+        "nws_gridpoint": "EWX/126,74",
+    },
+    "philadelphia": {
+        "name": "Philadelphia",
+        "lat": 39.8721,   # KPHL — Philadelphia Intl
+        "lon": -75.2411,
+        "nws_station": "KPHL",
+        "nws_office": "PHI",
+        "nws_gridpoint": "PHI/49,69",
     },
 }
 

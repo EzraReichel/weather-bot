@@ -240,6 +240,19 @@ def start_scheduler():
         max_instances=1,
     )
 
+    # Model-run trigger scans — fire 15 minutes after GFS/ECMWF publish
+    # GFS runs: ~00Z, 06Z, 12Z, 18Z → products available ~03:30, 09:30, 15:30, 21:30 UTC
+    # In ET: 23:30, 05:30, 11:30, 17:30 (standard) / 00:30, 06:30, 12:30, 18:30 (DST)
+    # We use ET via timezone param so DST is handled automatically
+    for hour, label in [(3, "00Z"), (9, "06Z"), (15, "12Z"), (21, "18Z")]:
+        scheduler.add_job(
+            weather_scan_job,
+            CronTrigger(hour=hour, minute=30, timezone="America/New_York"),
+            id=f"model_run_scan_{label}",
+            replace_existing=True,
+            max_instances=1,
+        )
+
     # Combined daily summary at 11:00 PM Eastern (America/New_York handles DST)
     scheduler.add_job(
         daily_summary_job,
@@ -251,8 +264,9 @@ def start_scheduler():
 
     scheduler.start()
     logger.info(
-        f"Scheduler started — scan every {scan_secs}s, "
-        f"settlement every 30m, paper settlement every 1h, daily summary at 23:00 ET"
+        f"Scheduler started — scan every {scan_secs}s, settlement every 30m, "
+        f"paper settlement every 1h, model-run scans at 03:30/09:30/15:30/21:30 ET, "
+        f"daily summary at 23:00 ET"
     )
 
     # Run first scan immediately

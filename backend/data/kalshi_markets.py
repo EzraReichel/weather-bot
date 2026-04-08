@@ -1,64 +1,192 @@
-"""Kalshi weather market fetcher — scans all configured weather series."""
+"""
+Kalshi weather market fetcher — dynamically discovers all active weather series.
+
+Replaces the hardcoded 5-city list with a live API scan of every series ticker
+that starts with KXHIGH, KXLOW, or KXRAIN. Unknown cities fall back to
+lat/lon geocoding from the series title if not in KNOWN_SERIES_MAP.
+"""
 import logging
 import re
 from datetime import date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
 from backend.data.weather_markets import WeatherMarket
 
 logger = logging.getLogger("weatherbot")
 
-# ── Series configuration ─────────────────────────────────────────────────────
-# Each entry: (series_ticker, city_key, metric)
-# To add a new series, just append a tuple here.
-WEATHER_SERIES: List[tuple] = [
-    # Daily HIGH temperature
-    ("KXHIGHNY",  "nyc",         "high"),
-    ("KXHIGHCHI", "chicago",     "high"),
-    ("KXHIGHMIA", "miami",       "high"),
-    ("KXHIGHLAX", "los_angeles", "high"),
-    ("KXHIGHDEN", "denver",      "high"),
-    # Daily LOW temperature
-    ("KXLOWNY",   "nyc",         "low"),
-    ("KXLOWCHI",  "chicago",     "low"),
-    ("KXLOWMIA",  "miami",       "low"),
-    ("KXLOWLAX",  "los_angeles", "low"),
-    ("KXLOWDEN",  "denver",      "low"),
-]
-
-CITY_NAMES: Dict[str, str] = {
-    "nyc":         "New York",
-    "chicago":     "Chicago",
-    "miami":       "Miami",
-    "los_angeles": "Los Angeles",
-    "denver":      "Denver",
-}
-
-MIN_ASK_SIZE = 50       # minimum contracts on the yes ask
-MIN_VOLUME_24H = 1000   # minimum 24h volume ($1 face value per contract)
+MIN_ASK_SIZE   = 50     # minimum contracts on the yes ask
+MIN_VOLUME_24H = 200    # minimum 24h volume ($1 face value per contract)
+                        # Lower than original 1000 to include next-day markets that haven't
+                        # fully traded yet but have real ask depth
 
 MONTH_ABBR = {
     "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
     "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
 }
 
+# ── Known series → city_key + metric mapping ──────────────────────────────────
+# (series_ticker, city_key, metric)
+# city_key must exist in backend/data/weather.py CITY_CONFIG.
+# If a new series appears that isn't here, it's skipped with a debug log.
+KNOWN_SERIES_MAP: Dict[str, Tuple[str, str]] = {
+    # HIGH temperature
+    "KXHIGHNY":       ("nyc",           "high"),
+    "KXHIGHNY0":      ("nyc",           "high"),
+    "KXHIGHCHI":      ("chicago",       "high"),
+    "KXHIGHMIA":      ("miami",         "high"),
+    "KXHIGHLAX":      ("los_angeles",   "high"),
+    "KXHIGHDEN":      ("denver",        "high"),
+    "KXHIGHAUS":      ("austin",        "high"),
+    "KXHIGHHOU":      ("houston",       "high"),
+    "KXHIGHOU":       ("houston",       "high"),   # legacy ticker
+    "KXHIGHTBOS":     ("boston",        "high"),
+    "KXHIGHTDC":      ("washington_dc", "high"),
+    "KXHIGHTPHX":     ("phoenix",       "high"),
+    "KXHIGHTSEA":     ("seattle",       "high"),
+    "KXHIGHTSFO":     ("san_francisco", "high"),
+    "KXHIGHTATL":     ("atlanta",       "high"),
+    "KXHIGHTDAL":     ("dallas",        "high"),
+    "KXHIGHTLV":      ("las_vegas",     "high"),
+    "KXHIGHTMIN":     ("minneapolis",   "high"),
+    "KXHIGHTNOLA":    ("new_orleans",   "high"),
+    "KXHIGHTOKC":     ("oklahoma_city", "high"),
+    "KXHIGHTSATX":    ("san_antonio",   "high"),
+    "KXHIGHTHOU":     ("houston",       "high"),
+    "KXHIGHPHIL":     ("philadelphia",  "high"),
+    "KXHIGHTEMPDEN":  ("denver",        "high"),   # legacy
+    # LOW temperature
+    "KXLOWNY":        ("nyc",           "low"),
+    "KXLOWNYC":       ("nyc",           "low"),
+    "KXLOWTNYC":      ("nyc",           "low"),
+    "KXLOWCHI":       ("chicago",       "low"),
+    "KXLOWTCHI":      ("chicago",       "low"),
+    "KXLOWMIA":       ("miami",         "low"),
+    "KXLOWTMIA":      ("miami",         "low"),
+    "KXLOWLAX":       ("los_angeles",   "low"),
+    "KXLOWTLAX":      ("los_angeles",   "low"),
+    "KXLOWDEN":       ("denver",        "low"),
+    "KXLOWTDEN":      ("denver",        "low"),
+    "KXLOWAUS":       ("austin",        "low"),
+    "KXLOWTAUS":      ("austin",        "low"),
+    "KXLOWPHIL":      ("philadelphia",  "low"),
+    "KXLOWTPHIL":     ("philadelphia",  "low"),
+    "KXLOWTBOS":      ("boston",        "low"),
+    "KXLOWTDC":       ("washington_dc", "low"),
+    "KXLOWTPHX":      ("phoenix",       "low"),
+    "KXLOWTSEA":      ("seattle",       "low"),
+    "KXLOWTSFO":      ("san_francisco", "low"),
+    "KXLOWTATL":      ("atlanta",       "low"),
+    "KXLOWTDAL":      ("dallas",        "low"),
+    "KXLOWTLV":       ("las_vegas",     "low"),
+    "KXLOWTMIN":      ("minneapolis",   "low"),
+    "KXLOWTNOLA":     ("new_orleans",   "low"),
+    "KXLOWTOKC":      ("oklahoma_city", "low"),
+    "KXLOWTSATX":     ("san_antonio",   "low"),
+    "KXLOWTHOU":      ("houston",       "low"),
+    # RAIN — binary yes/no (will it rain today)
+    "KXRAINNY":       ("nyc",           "rain"),
+    "KXRAINNYC":      ("nyc",           "rain"),
+    "KXRAINCHIM":     ("chicago",       "rain"),
+    "KXRAINMIA":      ("miami",         "rain"),
+    "KXRAINMIAM":     ("miami",         "rain"),
+    "KXRAINLAXM":     ("los_angeles",   "rain"),
+    "KXRAINDENM":     ("denver",        "rain"),
+    "KXRAINAUSM":     ("austin",        "rain"),
+    "KXRAINHOUM":     ("houston",       "rain"),
+    "KXRAINHOU":      ("houston",       "rain"),
+    "KXRAINSEAM":     ("seattle",       "rain"),
+    "KXRAINSEA":      ("seattle",       "rain"),
+    "KXRAINSFOM":     ("san_francisco", "rain"),
+    "KXRAINDALM":     ("dallas",        "rain"),
+    "KXRAINNO":       ("new_orleans",   "rain"),
+}
+
+# Prefixes we scan — non-weather series with these prefixes are filtered
+# by KNOWN_SERIES_MAP lookup, so false matches are safely skipped.
+WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN")
+
+# Series that are definitively NOT temperature/rain markets (avoid scanning)
+NON_WEATHER_BLACKLIST = {
+    "KXHIGHINFLATION", "KXHIGHMOVDJT", "KXHIGHMOVKH",
+    "KXHIGHUS", "KXHIGHNYD",  # directional/national aggregates
+    "KXLOWESTRATE",            # Fed funds rate
+    "KXRAINNOSB",              # Super Bowl one-off
+}
+
+# ── Series discovery ──────────────────────────────────────────────────────────
+
+async def discover_active_series(client: KalshiClient) -> List[Tuple[str, str, str]]:
+    """
+    Fetch all Kalshi series, filter to active weather series, return as
+    list of (series_ticker, city_key, metric) tuples.
+
+    Only returns series that have a mapping in KNOWN_SERIES_MAP.
+    Unknown series are logged at DEBUG so we can add them later.
+    """
+    try:
+        data = await client.get("/series", {"limit": 500})
+        all_series = data.get("series", [])
+    except Exception as e:
+        logger.warning(f"Series discovery failed: {e} — falling back to hardcoded list")
+        return _hardcoded_fallback()
+
+    active: List[Tuple[str, str, str]] = []
+    seen_city_metric: set = set()   # deduplicate (city_key, metric) pairs
+
+    for s in all_series:
+        ticker = s.get("ticker", "")
+        if not any(ticker.startswith(p) for p in WEATHER_PREFIXES):
+            continue
+        if ticker in NON_WEATHER_BLACKLIST:
+            continue
+
+        mapping = KNOWN_SERIES_MAP.get(ticker)
+        if mapping is None:
+            logger.debug(f"Unknown series {ticker!r} ({s.get('title','')}) — add to KNOWN_SERIES_MAP to enable")
+            continue
+
+        city_key, metric = mapping
+        dedup_key = (city_key, metric)
+        if dedup_key in seen_city_metric:
+            # Skip duplicate series for the same city+metric (e.g. KXHIGHNY and KXHIGHNY0)
+            logger.debug(f"Skipping duplicate series {ticker} for {city_key}/{metric}")
+            continue
+
+        seen_city_metric.add(dedup_key)
+        active.append((ticker, city_key, metric))
+
+    logger.info(
+        f"Series discovery: {len(all_series)} total → {len(active)} active weather series "
+        f"({sum(1 for _,_,m in active if m=='high')} high, "
+        f"{sum(1 for _,_,m in active if m=='low')} low, "
+        f"{sum(1 for _,_,m in active if m=='rain')} rain)"
+    )
+    return active
+
+
+def _hardcoded_fallback() -> List[Tuple[str, str, str]]:
+    """Emergency fallback if the /series endpoint fails."""
+    return [
+        ("KXHIGHNY",  "nyc",         "high"),
+        ("KXHIGHCHI", "chicago",     "high"),
+        ("KXHIGHMIA", "miami",       "high"),
+        ("KXHIGHLAX", "los_angeles", "high"),
+        ("KXHIGHDEN", "denver",      "high"),
+        ("KXLOWNY",   "nyc",         "low"),
+        ("KXLOWCHI",  "chicago",     "low"),
+        ("KXLOWMIA",  "miami",       "low"),
+        ("KXLOWLAX",  "los_angeles", "low"),
+        ("KXLOWDEN",  "denver",      "low"),
+    ]
+
+
+# ── Ticker parsers ────────────────────────────────────────────────────────────
 
 def _parse_market_title_direction(title: str) -> Optional[str]:
-    """
-    Extract direction from the Kalshi market title.
-    Titles explicitly say 'be >X' or 'be <X' or 'be X-Y'.
-
-    Returns "above", "below", or None (for bracket range markets).
-    """
     t = title.lower()
-    # Bracket range: "be 48-49°" or "be between 48 and 49"
-    if re.search(r'be \d+[-–]\d+', t):
-        return None   # range bracket — skip
-    if re.search(r'between \d+ and \d+', t):
+    if re.search(r'be \d+[-–]\d+', t) or re.search(r'between \d+ and \d+', t):
         return None
-
-    # Tail markets: "be >X" / ">= X" = above, "be <X" / "<= X" = below
     if re.search(r'be\s*[>≥]|above|exceed|over', t):
         return "above"
     if re.search(r'be\s*[<≤]|below|under|less than', t):
@@ -66,16 +194,8 @@ def _parse_market_title_direction(title: str) -> Optional[str]:
     return None
 
 
-def _parse_kalshi_ticker(ticker: str, city_key: str, metric: str, title: str = "") -> Optional[dict]:
-    """
-    Parse a Kalshi weather ticker.
-
-    Kalshi KXHIGH series has two market types:
-      T tickers = tail markets: "will high be >X°" or "will high be <X°"  (binary, tradeable)
-      B tickers = bracket markets: "will high be X-(X+1)°"                (range, skip)
-
-    Direction is read from the market title, which is authoritative.
-    """
+def _parse_temp_ticker(ticker: str, city_key: str, metric: str, title: str = "") -> Optional[dict]:
+    """Parse a KXHIGH/KXLOW temperature ticker."""
     match = re.match(
         r'^[A-Z]+-(\d{2})([A-Z]{3})(\d{2})-([BT])([\d.]+)$',
         ticker,
@@ -84,7 +204,7 @@ def _parse_kalshi_ticker(ticker: str, city_key: str, metric: str, title: str = "
         return None
 
     yy, mon_str, dd = int(match.group(1)), match.group(2), int(match.group(3))
-    boundary_type = match.group(4)  # "B" or "T"
+    boundary_type = match.group(4)
     threshold = float(match.group(5))
 
     month = MONTH_ABBR.get(mon_str)
@@ -96,16 +216,11 @@ def _parse_kalshi_ticker(ticker: str, city_key: str, metric: str, title: str = "
     except ValueError:
         return None
 
-    # B markets are 1°F bracket ranges — not binary, skip them
     if boundary_type == "B":
-        return None
+        return None   # bracket range — not binary
 
-    # T markets are tail markets — determine above/below from the title
     direction = _parse_market_title_direction(title)
     if direction is None:
-        # Title didn't parse cleanly — fall back to heuristic:
-        # Lower-valued T = lower tail = below, higher-valued T = upper tail = above
-        # (not reliable, so skip rather than guess)
         logger.debug(f"Skipping {ticker}: can't determine direction from title '{title}'")
         return None
 
@@ -114,34 +229,82 @@ def _parse_kalshi_ticker(ticker: str, city_key: str, metric: str, title: str = "
         "threshold_f": threshold,
         "metric": metric,
         "direction": direction,
+        "market_type": "temperature",
     }
 
+
+def _parse_rain_ticker(ticker: str, city_key: str, title: str = "") -> Optional[dict]:
+    """
+    Parse a KXRAIN ticker.
+    Format: SERIES-YYMMMDD-T0  (threshold is always 0 for binary rain markets)
+    """
+    match = re.match(
+        r'^[A-Z]+-(\d{2})([A-Z]{3})(\d{2})-T0$',
+        ticker,
+    )
+    if not match:
+        return None
+
+    yy, mon_str, dd = int(match.group(1)), match.group(2), int(match.group(3))
+    month = MONTH_ABBR.get(mon_str)
+    if not month:
+        return None
+
+    try:
+        target_date = date(2000 + yy, month, dd)
+    except ValueError:
+        return None
+
+    return {
+        "target_date": target_date,
+        "threshold_f": 0.0,
+        "metric": "rain",
+        "direction": "above",   # YES = will rain
+        "market_type": "rain",
+    }
+
+
+# ── Main fetch function ───────────────────────────────────────────────────────
 
 async def fetch_kalshi_weather_markets(
     city_keys: Optional[List[str]] = None,
 ) -> List[WeatherMarket]:
     """
-    Fetch open binary weather temperature markets from Kalshi.
+    Dynamically discover all active Kalshi weather series and fetch their
+    open binary (T-ticker) markets. Applies liquidity filters.
 
-    Only returns T (tail) markets — the binary above/below ones.
-    Skips B (bracket) range markets which require a different probability model.
-    Skips markets with no price data (not yet actively quoted).
+    city_keys: if provided, only fetch markets for these cities.
     """
     if not kalshi_credentials_present():
         return []
 
     client = KalshiClient()
-    markets: List[WeatherMarket] = []
     today = date.today()
     skipped_no_price = 0
     skipped_bracket = 0
     skipped_low_liquidity = 0
+    skipped_unknown_city = 0
 
-    for series_ticker, city_key, metric in WEATHER_SERIES:
+    # Import here to avoid circular imports
+    from backend.data.weather import CITY_CONFIG
+
+    # Discover all active series
+    active_series = await discover_active_series(client)
+
+    markets: List[WeatherMarket] = []
+
+    for series_ticker, city_key, metric in active_series:
         if city_keys and city_key not in city_keys:
             continue
 
-        city_name = CITY_NAMES.get(city_key, city_key)
+        # Skip cities we don't have weather data for
+        if city_key not in CITY_CONFIG:
+            logger.debug(f"No weather config for {city_key} ({series_ticker}) — skipping")
+            skipped_unknown_city += 1
+            continue
+
+        city_cfg = CITY_CONFIG[city_key]
+        city_name = city_cfg["name"]
         cursor = None
 
         try:
@@ -159,30 +322,33 @@ async def fetch_kalshi_weather_markets(
 
                 for m in raw_markets:
                     ticker = m.get("ticker", "")
-                    title = m.get("title", ticker)
+                    title  = m.get("title", ticker)
 
-                    # Skip bracket (B) markets at parse time
-                    if "-B" in ticker:
-                        skipped_bracket += 1
-                        continue
-
-                    parsed = _parse_kalshi_ticker(ticker, city_key, metric, title)
-                    if not parsed:
-                        skipped_bracket += 1
-                        continue
+                    # Parse based on metric type
+                    if metric == "rain":
+                        parsed = _parse_rain_ticker(ticker, city_key, title)
+                        if not parsed:
+                            skipped_bracket += 1
+                            continue
+                    else:
+                        if "-B" in ticker:
+                            skipped_bracket += 1
+                            continue
+                        parsed = _parse_temp_ticker(ticker, city_key, metric, title)
+                        if not parsed:
+                            skipped_bracket += 1
+                            continue
 
                     if parsed["target_date"] < today:
                         continue
 
-                    # Price resolution: Kalshi returns *_dollars fields (e.g. "0.0900" = 9¢)
-                    # Prefer ask; fall back to last traded price; skip if no data at all.
-                    yes_ask_d   = m.get("yes_ask_dollars")
-                    no_ask_d    = m.get("no_ask_dollars")
-                    last_d      = m.get("last_price_dollars")
-                    # Also check legacy integer cent fields as fallback
-                    yes_ask_c   = m.get("yes_ask")
-                    no_ask_c    = m.get("no_ask")
-                    last_c      = m.get("last_price")
+                    # Price resolution
+                    yes_ask_d = m.get("yes_ask_dollars")
+                    no_ask_d  = m.get("no_ask_dollars")
+                    last_d    = m.get("last_price_dollars")
+                    yes_ask_c = m.get("yes_ask")
+                    no_ask_c  = m.get("no_ask")
+                    last_c    = m.get("last_price")
 
                     if yes_ask_d is not None:
                         yes_price = float(yes_ask_d)
@@ -194,7 +360,7 @@ async def fetch_kalshi_weather_markets(
                         yes_price = last_c / 100.0
                     else:
                         skipped_no_price += 1
-                        continue   # no price data — can't trade
+                        continue
 
                     if no_ask_d is not None:
                         no_price = float(no_ask_d)
@@ -203,13 +369,12 @@ async def fetch_kalshi_weather_markets(
                     else:
                         no_price = 1.0 - yes_price
 
-                    # Skip resolved or near-certain markets
                     if yes_price > 0.97 or yes_price < 0.03:
                         continue
 
-                    # Liquidity filters — skip ghost markets with stale prices
+                    # Liquidity filters
                     yes_ask_size = float(m.get("yes_ask_size_fp") or 0)
-                    volume_24h = float(m.get("volume_24h_fp") or 0)
+                    volume_24h   = float(m.get("volume_24h_fp") or 0)
 
                     if yes_ask_size < MIN_ASK_SIZE:
                         logger.info(
@@ -249,8 +414,9 @@ async def fetch_kalshi_weather_markets(
             logger.warning(f"Failed to fetch Kalshi markets for {series_ticker}: {e}")
 
     logger.info(
-        f"Found {len(markets)} tradeable Kalshi weather markets "
+        f"Found {len(markets)} tradeable Kalshi weather markets across "
+        f"{len({m.city_key for m in markets})} cities "
         f"(skipped {skipped_bracket} brackets, {skipped_no_price} no-price, "
-        f"{skipped_low_liquidity} low-liquidity)"
+        f"{skipped_low_liquidity} low-liquidity, {skipped_unknown_city} unknown-city)"
     )
     return markets

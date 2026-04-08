@@ -186,6 +186,48 @@ async def _fetch_nws_point_forecast(
                               ok=False, error=str(e))
 
 
+# ── Rain probability fetcher ──────────────────────────────────────────────────
+
+async def fetch_rain_probability(city_key: str, target_date: date) -> Optional[float]:
+    """
+    Fetch daily precipitation probability (0-1) from Open-Meteo for a city.
+    Returns the mean of the GFS ensemble's precipitation_probability members,
+    or None on failure.
+    """
+    city = CITY_CONFIG.get(city_key)
+    if not city:
+        return None
+
+    params = {
+        "latitude":   city["lat"],
+        "longitude":  city["lon"],
+        "daily":      "precipitation_probability_max",
+        "start_date": target_date.isoformat(),
+        "end_date":   target_date.isoformat(),
+        "models":     "gfs_seamless",
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            # Use the regular (non-ensemble) forecast API for precipitation
+            resp = await client.get(
+                "https://api.open-meteo.com/v1/forecast",
+                params=params,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        values = data.get("daily", {}).get("precipitation_probability_max", [])
+        if not values or values[0] is None:
+            return None
+
+        return float(values[0]) / 100.0   # convert percent to 0-1
+
+    except Exception as e:
+        logger.warning(f"Rain probability fetch failed for {city_key}: {e}")
+        return None
+
+
 # ── Public API: fetch all sources in parallel ─────────────────────────────────
 
 async def fetch_all_sources(

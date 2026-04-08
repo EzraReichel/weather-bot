@@ -62,6 +62,10 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     Fetches GFS, ECMWF, GEM, and NWS forecasts in parallel. Falls back
     gracefully to single-source GFS if multi-source fetch fails.
     """
+    # ── Rain markets: use precipitation probability directly ──────────────────
+    if market.metric == "rain":
+        return await _generate_rain_signal(market)
+
     # ── Try multi-source first ────────────────────────────────────────────────
     multi_result: Optional[MultiSourceResult] = None
 
@@ -208,6 +212,60 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         source_probs=source_probs_map,
         agreement=agreement,
         sources_used=sources_used,
+    )
+
+
+async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradingSignal]:
+    """Generate signal for binary rain markets using GFS precipitation probability."""
+    from backend.data.multi_source_weather import fetch_rain_probability
+
+    rain_prob = await fetch_rain_probability(market.city_key, market.target_date)
+    if rain_prob is None:
+        return None
+
+    # market.direction == "above" means YES = will rain
+    model_yes_prob = max(0.05, min(0.95, rain_prob))
+    market_yes_prob = market.yes_price
+
+    edge = model_yes_prob - market_yes_prob
+    direction = "yes" if edge >= 0 else "no"
+    entry_price = market.yes_price if direction == "yes" else market.no_price
+
+    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE:
+        edge = 0.0
+
+    suggested_size = kelly_size(
+        model_prob=model_yes_prob,
+        market_price=market_yes_prob,
+        direction=direction,
+        bankroll=settings.INITIAL_BANKROLL,
+        kelly_fraction=settings.KELLY_FRACTION,
+        fee_rate=settings.KALSHI_FEE_RATE,
+    )
+    suggested_size = min(suggested_size, settings.WEATHER_MAX_TRADE_SIZE)
+
+    reasoning = (
+        f"[RAIN] {market.city_name} rain on {market.target_date} | "
+        f"GFS precip prob={rain_prob:.0%} | Market={market_yes_prob:.0%} | "
+        f"Edge={edge:+.1%} → {direction.upper()}"
+    )
+
+    return WeatherTradingSignal(
+        market=market,
+        model_probability=model_yes_prob,
+        market_probability=market_yes_prob,
+        edge=edge,
+        direction=direction,
+        confidence=0.6,
+        kelly_fraction=suggested_size / settings.INITIAL_BANKROLL if settings.INITIAL_BANKROLL > 0 else 0,
+        suggested_size=suggested_size,
+        reasoning=reasoning,
+        ensemble_mean=rain_prob * 100,
+        ensemble_std=0.0,
+        ensemble_members=1,
+        source_probs={"gfs": model_yes_prob},
+        agreement="MEDIUM",
+        sources_used=["gfs"],
     )
 
 
