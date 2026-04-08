@@ -98,30 +98,66 @@ def send_signal_alert(signal) -> bool:
 
 
 def send_daily_summary(
-    total_signals: int,
+    unique_signals: int,
     actionable_signals: int,
-    trades_taken: int,
-    total_pnl: float,
-    bankroll: float,
+    paper_logged_today: list,
+    paper_resolved_today: list,
+    daily_paper_pnl: float,
+    paper_stats: dict,
 ) -> bool:
-    """Send end-of-day summary to Discord."""
+    """Send combined end-of-day summary to Discord at 11 PM ET."""
     if not settings.DISCORD_WEBHOOK_URL:
         return False
 
-    pnl_sign = "+" if total_pnl >= 0 else ""
-    color = COLOR_GREEN if total_pnl >= 0 else COLOR_RED
+    pnl_sign = "+" if daily_paper_pnl >= 0 else ""
+    running_pnl = paper_stats.get("total_pnl", 0.0)
+    running_sign = "+" if running_pnl >= 0 else ""
+    color = COLOR_GREEN if running_pnl >= 0 else COLOR_RED
+
+    wins  = paper_stats.get("wins", 0)
+    losses = paper_stats.get("losses", 0)
+    brier = paper_stats.get("brier")
+    brier_str = f"{brier:.3f}" if brier is not None else "n/a"
+
+    # Paper trades logged today — brief list
+    if paper_logged_today:
+        logged_lines = [
+            f"`{t.ticker}` — {t.side.upper()} edge={t.edge:+.1%} @ {t.entry_price:.2%}"
+            for t in paper_logged_today
+        ]
+        logged_text = "\n".join(logged_lines)
+    else:
+        logged_text = "None today"
+
+    # Paper trades resolved today
+    if paper_resolved_today:
+        resolved_lines = []
+        for t in paper_resolved_today:
+            icon = "✅" if t.result == "win" else "❌"
+            resolved_lines.append(
+                f"{icon} `{t.ticker}` — {t.actual_temp:.1f}°F vs {t.threshold_f:.0f}°F  ${t.pnl:+.2f}"
+            )
+        resolved_text = "\n".join(resolved_lines)
+    else:
+        resolved_text = "None settled today"
+
+    fields = [
+        {"name": "Unique Signals Today", "value": str(unique_signals),        "inline": True},
+        {"name": "Above Threshold",      "value": str(actionable_signals),    "inline": True},
+        {"name": "Paper Trades Logged",  "value": str(len(paper_logged_today)),"inline": True},
+        {"name": "Today's P&L",          "value": f"**{pnl_sign}${daily_paper_pnl:.2f}**", "inline": True},
+        {"name": "Running P&L",          "value": f"**{running_sign}${running_pnl:.2f}**", "inline": True},
+        {"name": "All-time W/L",         "value": f"{wins}W / {losses}L",     "inline": True},
+        {"name": "Brier Score",          "value": brier_str,                  "inline": True},
+        {"name": "New Paper Trades",     "value": logged_text,                "inline": False},
+        {"name": "Resolved Today",       "value": resolved_text,              "inline": False},
+    ]
 
     embed = {
         "title": "📊 Daily Summary",
         "color": color,
-        "fields": [
-            {"name": "Signals Found", "value": str(total_signals), "inline": True},
-            {"name": "Actionable", "value": str(actionable_signals), "inline": True},
-            {"name": "Trades Taken", "value": str(trades_taken), "inline": True},
-            {"name": "P&L", "value": f"**{pnl_sign}${total_pnl:.2f}**", "inline": True},
-            {"name": "Bankroll", "value": f"${bankroll:,.2f}", "inline": True},
-        ],
-        "footer": {"text": "Kalshi Weather Arb Bot"},
+        "fields": fields,
+        "footer": {"text": "Kalshi Weather Arb Bot · 11 PM ET"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -184,50 +220,6 @@ def send_paper_trade_alert(signal, trade) -> bool:
         logger.info(f"Discord paper trade alert sent: {market.market_id} {side}")
     return success
 
-
-def send_paper_daily_summary(stats: dict, resolved_today: list) -> bool:
-    """Send the paper trading daily summary at 11 PM ET."""
-    if not settings.DISCORD_WEBHOOK_URL:
-        return False
-
-    pnl = stats["total_pnl"]
-    pnl_sign = "+" if pnl >= 0 else ""
-    color = COLOR_GREEN if pnl >= 0 else COLOR_RED
-    win_rate = (stats["wins"] / stats["resolved"] * 100) if stats["resolved"] > 0 else 0.0
-    brier_str = f"{stats['brier']:.3f}" if stats["brier"] is not None else "n/a"
-
-    # Resolved-today lines
-    resolved_lines = []
-    for t in resolved_today:
-        icon = "✅" if t.result == "win" else "❌"
-        resolved_lines.append(
-            f"{icon} `{t.ticker}` — actual {t.actual_temp:.1f}°F vs {t.threshold_f:.0f}°F  P&L ${t.pnl:+.2f}"
-        )
-    resolved_text = "\n".join(resolved_lines) if resolved_lines else "None today"
-
-    fields = [
-        {"name": "Total Paper Trades", "value": str(stats["total"]),        "inline": True},
-        {"name": "Resolved",           "value": str(stats["resolved"]),      "inline": True},
-        {"name": "Pending",            "value": str(stats["unresolved"]),    "inline": True},
-        {"name": "W/L Record",         "value": f"{stats['wins']}W / {stats['losses']}L  ({win_rate:.0f}%)", "inline": True},
-        {"name": "Running P&L",        "value": f"**{pnl_sign}${pnl:.2f}**","inline": True},
-        {"name": "Brier Score",        "value": brier_str,                   "inline": True},
-        {"name": "Avg Edge at Entry",  "value": f"{stats['avg_edge']:+.1%}", "inline": True},
-        {"name": "Resolved Today",     "value": resolved_text,               "inline": False},
-    ]
-
-    embed = {
-        "title": "📋 Paper Trading Daily Summary",
-        "color": color,
-        "fields": fields,
-        "footer": {"text": "Kalshi Weather Arb Bot · Paper Trading"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-    success = _post_embed(embed)
-    if success:
-        logger.info("Discord paper daily summary sent")
-    return success
 
 
 def send_startup_message(simulation_mode: bool, bankroll: float) -> bool:

@@ -132,62 +132,71 @@ async def paper_settlement_job():
         logger.error(f"Paper settlement error: {e}", exc_info=True)
 
 
-async def paper_daily_summary_job():
-    """Send paper trading daily summary to Discord at 11 PM ET (04:00 UTC next day)."""
-    try:
-        from backend.core.paper_trading import get_paper_stats, PaperSessionLocal, PaperTrade
-        from backend.notifications.discord import send_paper_daily_summary
-        from datetime import timezone
-
-        db = PaperSessionLocal()
-        try:
-            stats = get_paper_stats(db)
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-            resolved_today = [
-                t for t in stats["resolved_trades"]
-                if t.resolved_at and t.resolved_at >= today_start
-            ]
-            send_paper_daily_summary(stats, resolved_today)
-        finally:
-            db.close()
-    except Exception as e:
-        logger.error(f"Paper daily summary error: {e}", exc_info=True)
-
-
 async def daily_summary_job():
-    """Send end-of-day summary to Discord."""
+    """
+    Send combined daily summary to Discord at 11:00 PM Eastern.
+    Covers: unique signals found today, paper trades logged today, paper trades
+    resolved today, running P&L, and Brier calibration score.
+    """
+    from zoneinfo import ZoneInfo
     logger.info("Sending daily summary...")
 
     try:
         from backend.notifications.discord import send_daily_summary
+        from backend.core.paper_trading import get_paper_stats
+        from backend.models.paper_trade import PaperSessionLocal, PaperTrade
 
-        db = SessionLocal()
+        # "Today" in Eastern time so the window aligns with the 11 PM ET trigger
+        et = ZoneInfo("America/New_York")
+        now_et = datetime.now(et)
+        today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_start_utc = today_start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+        # ── Unique signal tickers seen today ──────────────────────────────────
+        main_db = SessionLocal()
         try:
-            today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-
-            total_signals = db.query(Signal).filter(Signal.timestamp >= today_start).count()
-            actionable_signals = db.query(Signal).filter(
-                Signal.timestamp >= today_start,
-                Signal.edge >= settings.MIN_EDGE_THRESHOLD,
-            ).count()
-            trades_taken = db.query(Trade).filter(Trade.timestamp >= today_start).count()
-            daily_pnl = db.query(func.coalesce(func.sum(Trade.pnl), 0.0)).filter(
-                Trade.settled == True,
-                Trade.settlement_time >= today_start,
-            ).scalar() or 0.0
-
-            state = db.query(BotState).first()
-            bankroll = state.bankroll if state else settings.INITIAL_BANKROLL
-
-            send_daily_summary(
-                total_signals=total_signals,
-                actionable_signals=actionable_signals,
-                trades_taken=trades_taken,
-                total_pnl=daily_pnl,
-                bankroll=bankroll,
+            from sqlalchemy import distinct
+            unique_tickers = (
+                main_db.query(distinct(Signal.market_ticker))
+                .filter(Signal.timestamp >= today_start_utc)
+                .count()
+            )
+            actionable_tickers = (
+                main_db.query(distinct(Signal.market_ticker))
+                .filter(
+                    Signal.timestamp >= today_start_utc,
+                    Signal.edge >= settings.MIN_EDGE_THRESHOLD,
+                )
+                .count()
             )
         finally:
-            db.close()
+            main_db.close()
+
+        # ── Paper trades logged today ─────────────────────────────────────────
+        paper_db = PaperSessionLocal()
+        try:
+            paper_stats = get_paper_stats(paper_db)
+
+            logged_today = [
+                t for t in paper_stats["all_trades"]
+                if t.created_at >= today_start_utc
+            ]
+            resolved_today = [
+                t for t in paper_stats["resolved_trades"]
+                if t.resolved_at and t.resolved_at >= today_start_utc
+            ]
+            daily_paper_pnl = sum(t.pnl for t in resolved_today if t.pnl is not None)
+        finally:
+            paper_db.close()
+
+        send_daily_summary(
+            unique_signals=unique_tickers,
+            actionable_signals=actionable_tickers,
+            paper_logged_today=logged_today,
+            paper_resolved_today=resolved_today,
+            daily_paper_pnl=daily_paper_pnl,
+            paper_stats=paper_stats,
+        )
 
     except Exception as e:
         logger.error(f"Daily summary error: {e}", exc_info=True)
@@ -231,20 +240,11 @@ def start_scheduler():
         max_instances=1,
     )
 
-    # Daily summary at 11:55 PM UTC
+    # Combined daily summary at 11:00 PM Eastern (America/New_York handles DST)
     scheduler.add_job(
         daily_summary_job,
-        CronTrigger(hour=23, minute=55),
+        CronTrigger(hour=23, minute=0, timezone="America/New_York"),
         id="daily_summary",
-        replace_existing=True,
-        max_instances=1,
-    )
-
-    # Paper trading daily summary at 04:00 UTC (11 PM ET)
-    scheduler.add_job(
-        paper_daily_summary_job,
-        CronTrigger(hour=4, minute=0),
-        id="paper_daily_summary",
         replace_existing=True,
         max_instances=1,
     )
@@ -252,7 +252,7 @@ def start_scheduler():
     scheduler.start()
     logger.info(
         f"Scheduler started — scan every {scan_secs}s, "
-        f"settlement every 30m, daily summary at 23:55 UTC"
+        f"settlement every 30m, paper settlement every 1h, daily summary at 23:00 ET"
     )
 
     # Run first scan immediately
