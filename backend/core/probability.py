@@ -1,13 +1,10 @@
 """
-Gaussian CDF probability engine for weather temperature markets.
-
-Replaces the raw ensemble fraction approach with a calibrated Gaussian model
-that accounts for lead-time uncertainty.
+Gaussian CDF probability engine — single and multi-source ensemble-of-ensembles.
 """
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, date
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from scipy.stats import norm
 
@@ -111,6 +108,159 @@ def compute_probability(
         lead_time_factor=factor,
         confidence=confidence,
         low_confidence_flag=low_confidence_flag,
+    )
+
+
+# ── Source weights for ensemble-of-ensembles ─────────────────────────────────
+SOURCE_WEIGHTS: Dict[str, float] = {
+    "nws":   0.30,   # Closest to Kalshi's resolution source (NOAA obs)
+    "ecmwf": 0.30,   # Generally most accurate global model
+    "gfs":   0.25,   # Solid baseline
+    "gem":   0.15,   # Additional independent signal
+}
+
+# Maximum probability spread (absolute) within which sources "agree"
+AGREEMENT_TIGHT = 0.10   # all within 10% → HIGH
+AGREEMENT_LOOSE = 0.20   # any pair > 20% → LOW
+
+# Edge threshold override when models disagree badly
+LOW_CONFIDENCE_EDGE_OVERRIDE = 0.15
+
+
+@dataclass
+class SourceProbability:
+    """Probability estimate from a single source."""
+    source: str
+    prob: float          # P(YES) from this source
+    members: int
+    mean: float
+    std: float
+    ok: bool = True
+
+
+@dataclass
+class MultiSourceResult:
+    """Combined probability from the ensemble-of-ensembles."""
+    combined_prob: float                           # weighted average P(YES)
+    source_probs: Dict[str, SourceProbability]     # per-source breakdown
+    agreement: str                                  # "HIGH", "MEDIUM", "LOW"
+    max_spread: float                               # max pairwise probability spread
+    weights_used: Dict[str, float]                  # normalised weights actually applied
+    low_confidence_flag: bool                       # True if agreement == LOW
+    # For backwards compat with single-source pipeline
+    ensemble_mean: float = 0.0
+    ensemble_std: float  = 0.0
+    ensemble_fraction: float = 0.0
+    adjusted_std: float  = 0.0
+    lead_time_factor: float = 1.0
+    confidence: float    = 0.7
+
+
+def compute_multi_source_probability(
+    sources: Dict,            # Dict[str, SourceForecast] from multi_source_weather
+    threshold_f: float,
+    direction: str,           # "above" or "below"
+    target_date: date,
+) -> Optional[MultiSourceResult]:
+    """
+    Compute ensemble-of-ensembles probability from multiple weather sources.
+
+    Each source's member array is fed through the Gaussian CDF independently.
+    Results are combined with SOURCE_WEIGHTS (renormalised if sources are missing).
+    Cross-model agreement is assessed to set confidence tier.
+    """
+    source_probs: Dict[str, SourceProbability] = {}
+    factor = _lead_time_factor(target_date)
+
+    for name, src in sources.items():
+        if not src.ok or not src.member_highs:
+            continue
+
+        import statistics as _stats
+        members = src.member_highs if direction in ("above", "below") else src.member_lows
+        # Pick the right list based on direction — but we don't know metric here,
+        # so callers pass the already-correct list. Use member_highs as primary,
+        # caller should pass appropriately filtered SourceForecast.
+        members = src.member_highs  # caller is responsible — see weather_signals.py
+
+        if len(members) < 2:
+            continue
+
+        mean = _stats.mean(members)
+        std  = _stats.stdev(members)
+        if std <= 0:
+            std = 0.1
+        adj_std = std * factor
+
+        if direction == "above":
+            prob = float(1.0 - norm.cdf(threshold_f, loc=mean, scale=adj_std))
+        else:
+            prob = float(norm.cdf(threshold_f, loc=mean, scale=adj_std))
+
+        prob = max(0.05, min(0.95, prob))
+
+        source_probs[name] = SourceProbability(
+            source=name, prob=prob, members=len(members),
+            mean=mean, std=adj_std, ok=True,
+        )
+
+    if not source_probs:
+        return None
+
+    # Normalise weights to available sources
+    raw_weights = {k: SOURCE_WEIGHTS.get(k, 0.0) for k in source_probs}
+    total_w = sum(raw_weights.values())
+    if total_w <= 0:
+        total_w = len(source_probs)
+        raw_weights = {k: 1.0 for k in source_probs}
+    norm_weights = {k: v / total_w for k, v in raw_weights.items()}
+
+    combined = sum(source_probs[k].prob * norm_weights[k] for k in source_probs)
+    combined = max(0.05, min(0.95, combined))
+
+    # Agreement assessment
+    probs = [sp.prob for sp in source_probs.values()]
+    max_spread = max(probs) - min(probs)
+
+    if len(probs) >= 4 and max_spread <= AGREEMENT_TIGHT:
+        agreement = "HIGH"
+    elif max_spread >= AGREEMENT_LOOSE:
+        agreement = "LOW"
+    else:
+        # Check if at least 3/4 are within tight band
+        sorted_probs = sorted(probs)
+        tight_windows = [
+            sorted_probs[i+2] - sorted_probs[i]
+            for i in range(len(sorted_probs) - 2)
+        ]
+        if tight_windows and min(tight_windows) <= AGREEMENT_TIGHT:
+            agreement = "MEDIUM"
+        else:
+            agreement = "MEDIUM"  # default to MEDIUM for 2-3 sources
+
+    low_confidence_flag = (agreement == "LOW")
+
+    # Backwards-compat fields: use GFS as reference for mean/std, else first available
+    ref = source_probs.get("gfs") or next(iter(source_probs.values()))
+    confidence = max(0.3, min(0.95, 1.0 - (ref.std / 10.0)))
+    if agreement == "HIGH":
+        confidence = min(0.95, confidence + 0.05)
+    elif agreement == "LOW":
+        confidence = max(0.3, confidence - 0.15)
+
+    return MultiSourceResult(
+        combined_prob=combined,
+        source_probs=source_probs,
+        agreement=agreement,
+        max_spread=max_spread,
+        weights_used=norm_weights,
+        low_confidence_flag=low_confidence_flag,
+        ensemble_mean=ref.mean,
+        ensemble_std=ref.std,
+        ensemble_fraction=combined,    # approximation
+        adjusted_std=ref.std,
+        lead_time_factor=factor,
+        confidence=confidence,
     )
 
 

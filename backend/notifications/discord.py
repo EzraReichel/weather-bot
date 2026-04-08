@@ -60,16 +60,37 @@ def send_signal_alert(signal) -> bool:
     conf_pct = f"{signal.confidence:.0%}"
     low_conf_note = "  ⚠️ Low Confidence (CDF vs fraction disagree)" if signal.low_confidence_flag else ""
 
+    # Per-source probability breakdown
+    sp = getattr(signal, "source_probs", {})
+    agreement = getattr(signal, "agreement", "MEDIUM")
+    agreement_icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(agreement, "🟡")
+
+    source_parts = []
+    for name in ["gfs", "ecmwf", "gem", "nws"]:
+        if name in sp:
+            source_parts.append(f"{name.upper()}: {sp[name]:.0%}")
+    source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
+
     fields = [
-        {"name": "Ticker", "value": f"`{market.market_id}`", "inline": True},
-        {"name": "Side", "value": f"**{side}**", "inline": True},
-        {"name": "Edge", "value": f"**{signal.edge:+.1%}**", "inline": True},
-        {"name": "Model Prob", "value": f"{signal.model_probability:.1%}", "inline": True},
-        {"name": "Market Price", "value": f"{signal.market_probability:.1%}", "inline": True},
-        {"name": "Kelly Size", "value": kelly_amount, "inline": True},
-        {"name": "Confidence", "value": conf_pct + low_conf_note, "inline": False},
+        {"name": "Ticker",        "value": f"`{market.market_id}`",           "inline": True},
+        {"name": "Side",          "value": f"**{side}**",                      "inline": True},
+        {"name": "Edge",          "value": f"**{signal.edge:+.1%}**",          "inline": True},
+        {"name": "Combined Prob", "value": f"{signal.model_probability:.1%}",  "inline": True},
+        {"name": "Market Price",  "value": f"{signal.market_probability:.1%}", "inline": True},
+        {"name": "Kelly Size",    "value": kelly_amount,                       "inline": True},
         {
-            "name": "Forecast",
+            "name": "Model Breakdown",
+            "value": source_breakdown,
+            "inline": False,
+        },
+        {
+            "name": "Agreement",
+            "value": f"{agreement_icon} **{agreement}**" + low_conf_note,
+            "inline": True,
+        },
+        {"name": "Confidence", "value": conf_pct, "inline": True},
+        {
+            "name": "Forecast (GFS ref)",
             "value": (
                 f"Mean: {signal.ensemble_mean:.1f}°F  |  "
                 f"Std: {signal.ensemble_std:.1f}°F  |  "
@@ -181,16 +202,25 @@ def send_paper_trade_alert(signal, trade) -> bool:
     conf_pct = f"{signal.confidence:.0%}"
     low_conf_note = "  ⚠️ Low Confidence" if signal.low_confidence_flag else ""
 
+    sp = getattr(signal, "source_probs", {})
+    agreement = getattr(signal, "agreement", "MEDIUM")
+    agreement_icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(agreement, "🟡")
+    source_parts = [
+        f"{n.upper()}: {sp[n]:.0%}" for n in ["gfs", "ecmwf", "gem", "nws"] if n in sp
+    ]
+    source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
+
     fields = [
-        {"name": "Ticker",       "value": f"`{market.market_id}`",              "inline": True},
-        {"name": "Side",         "value": f"**{side}**",                         "inline": True},
-        {"name": "Edge",         "value": f"**{signal.edge:+.1%}**",             "inline": True},
-        {"name": "Model Prob",   "value": f"{signal.model_probability:.1%}",     "inline": True},
-        {"name": "Market Price", "value": f"{signal.market_probability:.1%}",    "inline": True},
-        {"name": "Kelly Size",   "value": f"${signal.suggested_size:.0f}",       "inline": True},
-        {"name": "Contracts",    "value": str(trade.contracts),                  "inline": True},
-        {"name": "Entry Price",  "value": f"{trade.entry_price:.2%}",            "inline": True},
-        {"name": "Confidence",   "value": conf_pct + low_conf_note,              "inline": True},
+        {"name": "Ticker",        "value": f"`{market.market_id}`",              "inline": True},
+        {"name": "Side",          "value": f"**{side}**",                         "inline": True},
+        {"name": "Edge",          "value": f"**{signal.edge:+.1%}**",             "inline": True},
+        {"name": "Combined Prob", "value": f"{signal.model_probability:.1%}",     "inline": True},
+        {"name": "Market Price",  "value": f"{signal.market_probability:.1%}",    "inline": True},
+        {"name": "Kelly Size",    "value": f"${signal.suggested_size:.0f}",       "inline": True},
+        {"name": "Contracts",     "value": str(trade.contracts),                  "inline": True},
+        {"name": "Entry Price",   "value": f"{trade.entry_price:.2%}",            "inline": True},
+        {"name": "Agreement",     "value": f"{agreement_icon} {agreement}" + low_conf_note, "inline": True},
+        {"name": "Model Breakdown", "value": source_breakdown,                    "inline": False},
         {
             "name": "Forecast",
             "value": (

@@ -1,11 +1,18 @@
-"""Signal generator for Kalshi weather temperature markets using Gaussian CDF."""
+"""Signal generator using ensemble-of-ensembles (GFS + ECMWF + GEM + NWS)."""
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from backend.config import settings
-from backend.core.probability import compute_probability, kelly_size, min_profitable_edge
+from backend.core.probability import (
+    compute_multi_source_probability,
+    compute_probability,
+    kelly_size,
+    min_profitable_edge,
+    MultiSourceResult,
+    LOW_CONFIDENCE_EDGE_OVERRIDE,
+)
 from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
 from backend.data.weather_markets import WeatherMarket
 from backend.models.database import SessionLocal, Signal
@@ -21,7 +28,7 @@ class WeatherTradingSignal:
     model_probability: float = 0.5
     market_probability: float = 0.5
     edge: float = 0.0
-    direction: str = "yes"   # "yes" or "no"
+    direction: str = "yes"
 
     confidence: float = 0.5
     kelly_fraction: float = 0.0
@@ -35,66 +42,121 @@ class WeatherTradingSignal:
     ensemble_members: int = 0
     low_confidence_flag: bool = False
 
+    # Multi-source breakdown (None when only single-source GFS available)
+    source_probs: Dict[str, float] = field(default_factory=dict)   # {source: P(YES)}
+    agreement: str = "MEDIUM"   # "HIGH", "MEDIUM", "LOW"
+    sources_used: List[str] = field(default_factory=list)
+
     @property
     def passes_threshold(self) -> bool:
         edge_threshold = settings.MIN_EDGE_THRESHOLD
-        # Require higher edge if low_confidence_flag is set
-        if self.low_confidence_flag:
-            edge_threshold = max(edge_threshold, 0.12)
+        if self.low_confidence_flag or self.agreement == "LOW":
+            edge_threshold = max(edge_threshold, LOW_CONFIDENCE_EDGE_OVERRIDE)
         return abs(self.edge) >= edge_threshold
 
 
 async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTradingSignal]:
-    """Generate a trading signal using Gaussian CDF probability model."""
-    forecast = await fetch_ensemble_forecast(market.city_key, market.target_date)
-    if not forecast:
-        return None
+    """
+    Generate a trading signal using ensemble-of-ensembles probability model.
 
-    # Select member values for the metric
-    if market.metric == "high":
-        member_values = forecast.member_highs
+    Fetches GFS, ECMWF, GEM, and NWS forecasts in parallel. Falls back
+    gracefully to single-source GFS if multi-source fetch fails.
+    """
+    # ── Try multi-source first ────────────────────────────────────────────────
+    multi_result: Optional[MultiSourceResult] = None
+
+    try:
+        from backend.data.multi_source_weather import fetch_all_sources
+
+        raw_sources = await fetch_all_sources(market.city_key, market.target_date)
+
+        # Re-map member list to correct metric (highs vs lows)
+        from backend.data.multi_source_weather import SourceForecast
+        metric_sources: Dict[str, SourceForecast] = {}
+        for name, src in raw_sources.items():
+            if not src.ok:
+                metric_sources[name] = src
+                continue
+            members = src.member_highs if market.metric == "high" else src.member_lows
+            metric_sources[name] = SourceForecast(
+                source=name,
+                member_highs=members,
+                member_lows=members,
+                ok=bool(members),
+                error="" if members else f"no {market.metric} data",
+            )
+
+        multi_result = compute_multi_source_probability(
+            sources=metric_sources,
+            threshold_f=market.threshold_f,
+            direction=market.direction,
+            target_date=market.target_date,
+        )
+    except Exception as e:
+        logger.warning(f"Multi-source fetch failed for {market.market_id}, falling back to GFS: {e}")
+
+    # ── Fall back to single-source GFS ────────────────────────────────────────
+    if multi_result is None:
+        forecast = await fetch_ensemble_forecast(market.city_key, market.target_date)
+        if not forecast:
+            return None
+        member_values = forecast.member_highs if market.metric == "high" else forecast.member_lows
+        if not member_values:
+            return None
+
+        prob_result = compute_probability(
+            member_values=member_values,
+            threshold_f=market.threshold_f,
+            direction=market.direction,
+            target_date=market.target_date,
+        )
+        if not prob_result:
+            return None
+
+        model_yes_prob    = prob_result.model_prob
+        ensemble_mean     = prob_result.ensemble_mean
+        ensemble_std      = prob_result.ensemble_std
+        ensemble_members  = len(member_values)
+        low_conf          = prob_result.low_confidence_flag
+        confidence        = prob_result.confidence
+        source_probs_map  = {"gfs": model_yes_prob}
+        agreement         = "MEDIUM"
+        sources_used      = ["gfs"]
+        reasoning_sources = f"GFS only (multi-source unavailable)"
     else:
-        member_values = forecast.member_lows
+        model_yes_prob    = multi_result.combined_prob
+        ensemble_mean     = multi_result.ensemble_mean
+        ensemble_std      = multi_result.ensemble_std
+        ref_src           = multi_result.source_probs.get("gfs") or next(iter(multi_result.source_probs.values()))
+        ensemble_members  = ref_src.members
+        low_conf          = multi_result.low_confidence_flag
+        confidence        = multi_result.confidence
+        source_probs_map  = {k: v.prob for k, v in multi_result.source_probs.items()}
+        agreement         = multi_result.agreement
+        sources_used      = list(multi_result.source_probs.keys())
 
-    if not member_values:
-        return None
+        sp = multi_result.source_probs
+        parts = []
+        for name in ["gfs", "ecmwf", "gem", "nws"]:
+            if name in sp:
+                parts.append(f"{name.upper()}={sp[name].prob:.0%}")
+        reasoning_sources = (
+            f"Combined({multi_result.combined_prob:.0%}) "
+            f"[{' | '.join(parts)}] "
+            f"spread={multi_result.max_spread:.0%} agreement={agreement}"
+        )
 
-    # Compute Gaussian CDF probability
-    prob_result = compute_probability(
-        member_values=member_values,
-        threshold_f=market.threshold_f,
-        direction=market.direction,
-        target_date=market.target_date,
-    )
-    if not prob_result:
-        return None
-
-    model_yes_prob = prob_result.model_prob
     market_yes_prob = market.yes_price
 
-    # Edge = model_prob - market_price (for YES direction)
-    # Positive edge → bet YES; negative edge → bet NO
-    edge_yes = model_yes_prob - market_yes_prob
-    if abs(edge_yes) >= abs(1.0 - model_yes_prob - (1.0 - market_yes_prob)):
-        direction = "yes"
-        edge = edge_yes
-    else:
-        direction = "no"
-        edge = (1.0 - model_yes_prob) - (1.0 - market_yes_prob)
-
-    # Simpler: edge is always model_yes_prob - market_yes_prob
-    # Positive → YES is underpriced; Negative → NO is underpriced
+    # Edge direction
     edge = model_yes_prob - market_yes_prob
-    if edge >= 0:
-        direction = "yes"
-    else:
-        direction = "no"
+    direction = "yes" if edge >= 0 else "no"
 
     # Entry price filter
     entry_price = market.yes_price if direction == "yes" else market.no_price
     entry_price_filtered = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
 
-    # Kelly sizing with fee adjustment
+    # Kelly sizing
     suggested_size = kelly_size(
         model_prob=model_yes_prob,
         market_price=market_yes_prob,
@@ -106,26 +168,27 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     suggested_size = min(suggested_size, settings.WEATHER_MAX_TRADE_SIZE)
 
     if entry_price_filtered:
-        edge = 0.0  # Zero out but still return for visibility
+        edge = 0.0
 
-    # Build reasoning string
+    # Reasoning string
     min_edge = min_profitable_edge(settings.KALSHI_FEE_RATE)
-    status = "ACTIONABLE" if abs(edge) >= settings.MIN_EDGE_THRESHOLD else "FILTERED"
+    req_edge = LOW_CONFIDENCE_EDGE_OVERRIDE if (low_conf or agreement == "LOW") else settings.MIN_EDGE_THRESHOLD
+    status = "ACTIONABLE" if abs(edge) >= req_edge else "FILTERED"
+
     filter_notes = []
     if entry_price_filtered:
         filter_notes.append(f"entry {entry_price:.0%} > max {settings.WEATHER_MAX_ENTRY_PRICE:.0%}")
-    if prob_result.low_confidence_flag:
-        filter_notes.append(f"CDF/fraction disagree: {model_yes_prob:.0%} vs {prob_result.ensemble_fraction:.0%}")
+    if agreement == "LOW":
+        filter_notes.append(f"models disagree ({req_edge:.0%} edge required)")
     filter_note = f" [{', '.join(filter_notes)}]" if filter_notes else ""
 
     reasoning = (
         f"[{status}]{filter_note} "
-        f"{market.city_name} {market.metric} {market.direction} {market.threshold_f:.0f}F on {market.target_date} | "
-        f"Gaussian: mean={prob_result.ensemble_mean:.1f}F std={prob_result.ensemble_std:.1f}F "
-        f"adj_std={prob_result.adjusted_std:.1f}F (x{prob_result.lead_time_factor}) | "
-        f"Model YES: {model_yes_prob:.0%} | Raw fraction: {prob_result.ensemble_fraction:.0%} | "
-        f"Market: {market_yes_prob:.0%} | Edge: {edge:+.1%} → {direction.upper()} @ {entry_price:.0%} | "
-        f"Min edge after fees: {min_edge:.1%} | Confidence: {prob_result.confidence:.0%}"
+        f"{market.city_name} {market.metric} {market.direction} {market.threshold_f:.0f}F "
+        f"on {market.target_date} | {reasoning_sources} | "
+        f"mean={ensemble_mean:.1f}F std={ensemble_std:.1f}F | "
+        f"Market: {market_yes_prob:.0%} | Edge: {edge:+.1%} → {direction.upper()} "
+        f"@ {entry_price:.0%} | Min edge: {min_edge:.1%} | Conf: {confidence:.0%}"
     )
 
     return WeatherTradingSignal(
@@ -134,19 +197,22 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         market_probability=market_yes_prob,
         edge=edge,
         direction=direction,
-        confidence=prob_result.confidence,
+        confidence=confidence,
         kelly_fraction=suggested_size / settings.INITIAL_BANKROLL if settings.INITIAL_BANKROLL > 0 else 0,
         suggested_size=suggested_size,
         reasoning=reasoning,
-        ensemble_mean=prob_result.ensemble_mean,
-        ensemble_std=prob_result.ensemble_std,
-        ensemble_members=len(member_values),
-        low_confidence_flag=prob_result.low_confidence_flag,
+        ensemble_mean=ensemble_mean,
+        ensemble_std=ensemble_std,
+        ensemble_members=ensemble_members,
+        low_confidence_flag=low_conf,
+        source_probs=source_probs_map,
+        agreement=agreement,
+        sources_used=sources_used,
     )
 
 
 async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
-    """Scan Kalshi weather markets and generate Gaussian CDF-based signals."""
+    """Scan Kalshi weather markets and generate ensemble-of-ensembles signals."""
     from backend.data.kalshi_client import kalshi_credentials_present
     from backend.data.kalshi_markets import fetch_kalshi_weather_markets
 
@@ -156,7 +222,6 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
     logger.info("WEATHER SCAN: Fetching Kalshi temperature markets...")
 
     markets: List[WeatherMarket] = []
-
     if not kalshi_credentials_present():
         logger.warning("Kalshi credentials not configured — skipping market fetch")
     else:
@@ -186,10 +251,12 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
         f"{len(actionable)} actionable (edge >= {settings.MIN_EDGE_THRESHOLD:.0%})"
     )
     for s in actionable[:5]:
+        src_str = "/".join(s.sources_used).upper()
         logger.info(
             f"  {s.market.city_name} {s.market.metric} {s.market.direction} "
             f"{s.market.threshold_f:.0f}F | Edge: {s.edge:+.1%} → {s.direction.upper()} "
-            f"| Conf: {s.confidence:.0%}{'  ⚠ low-conf' if s.low_confidence_flag else ''}"
+            f"| {src_str} | Agreement: {s.agreement}"
+            f"{'  ⚠' if s.low_confidence_flag else ''}"
         )
 
     _persist_signals(signals)
@@ -197,7 +264,7 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
 
 
 def _persist_signals(signals: List[WeatherTradingSignal]):
-    """Save signals to DB for calibration tracking."""
+    """Save signals to DB — stores per-source probabilities in the JSON sources column."""
     to_save = [s for s in signals if abs(s.edge) > 0]
     if not to_save:
         return
@@ -212,6 +279,14 @@ def _persist_signals(signals: List[WeatherTradingSignal]):
             if existing:
                 continue
 
+            # Store per-source probs in the sources JSON column for calibration tracking
+            sources_payload = {
+                "models": signal.sources_used,
+                "agreement": signal.agreement,
+                "source_probs": signal.source_probs,
+                "combined_prob": signal.model_probability,
+            }
+
             db.add(Signal(
                 market_ticker=signal.market.market_id,
                 platform="kalshi",
@@ -224,7 +299,7 @@ def _persist_signals(signals: List[WeatherTradingSignal]):
                 confidence=signal.confidence,
                 kelly_fraction=signal.kelly_fraction,
                 suggested_size=signal.suggested_size,
-                sources=["open_meteo_gfs_ensemble"],
+                sources=sources_payload,
                 reasoning=signal.reasoning,
                 executed=False,
             ))

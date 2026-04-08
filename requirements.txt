@@ -15,8 +15,9 @@ httpx==0.26.0
 # Kalshi RSA-PSS authentication
 cryptography>=42.0.0
 
-# Probability engine (Gaussian CDF)
+# Probability engine (Gaussian CDF + NWS pseudo-ensemble generation)
 scipy==1.12.0
+numpy>=1.26
 
 # Scheduling
 apscheduler==3.10.4
