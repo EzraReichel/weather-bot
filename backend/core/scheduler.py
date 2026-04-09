@@ -21,6 +21,9 @@ scheduler: Optional[AsyncIOScheduler] = None
 _alerted_tickers: dict = {}   # ticker -> datetime of last alert
 _ALERT_DEDUP_HOURS = 6
 
+# Latest scan report — used by daily summary job
+_latest_scan_report = None
+
 
 async def weather_scan_job():
     """Scan Kalshi weather markets, generate signals, fire Discord alerts."""
@@ -31,14 +34,17 @@ async def weather_scan_job():
         from backend.core.weather_signals import scan_for_weather_signals
         from backend.notifications.discord import send_signal_alert
 
-        signals = await scan_for_weather_signals()
-        actionable = [s for s in signals if s.passes_threshold]
+        scan = await scan_for_weather_signals()
+        actionable = scan.actionable
 
         elapsed = time.time() - start
         logger.info(
-            f"Scanned {len(signals)} markets, found {len(actionable)} signals above threshold "
+            f"Scanned {len(scan.signals)} signals, {len(actionable)} above threshold "
             f"({elapsed:.1f}s)"
         )
+
+        # Store latest scan report for daily summary
+        _latest_scan_report = scan
 
         # Log paper trades and send Discord alerts for new actionable signals
         from backend.core.paper_trading import log_paper_trade
@@ -46,11 +52,8 @@ async def weather_scan_job():
 
         for signal in actionable:
             ticker = signal.market.market_id
-
-            # Always log paper trade (deduplication is inside log_paper_trade)
             trade = log_paper_trade(signal)
 
-            # 6-hour Discord dedup window
             last_alerted = _alerted_tickers.get(ticker)
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
             already_alerted = last_alerted is not None and last_alerted > alert_cutoff
@@ -196,6 +199,7 @@ async def daily_summary_job():
             paper_resolved_today=resolved_today,
             daily_paper_pnl=daily_paper_pnl,
             paper_stats=paper_stats,
+            scan_report=_latest_scan_report,
         )
 
     except Exception as e:

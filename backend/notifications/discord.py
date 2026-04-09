@@ -118,6 +118,56 @@ def send_signal_alert(signal) -> bool:
     return success
 
 
+def _build_filter_report_text(scan_report) -> str:
+    """Build a compact filter breakdown string from a ScanReport."""
+    if scan_report is None:
+        return "No scan data available."
+
+    fr = scan_report.fetch_report
+    lines = []
+
+    # Liquidity filtered
+    liq = [f for f in fr.filtered if f.reason in ("low_ask", "low_volume")] if fr else []
+    if liq:
+        liq_lines = []
+        for f in liq[:8]:   # cap at 8 to stay under Discord 1024-char limit
+            if f.reason == "low_ask":
+                liq_lines.append(f"`{f.ticker}` ask={f.ask_size:.0f}")
+            else:
+                liq_lines.append(f"`{f.ticker}` vol={f.volume_24h:.0f}")
+        if len(liq) > 8:
+            liq_lines.append(f"…+{len(liq)-8} more")
+        lines.append(f"**Liquidity ({len(liq)}):** " + "  ".join(liq_lines))
+    else:
+        lines.append("**Liquidity:** none filtered")
+
+    # Low agreement
+    la = scan_report.low_agreement_filtered or []
+    if la:
+        la_lines = []
+        for s in la[:6]:
+            sp = s.source_probs
+            parts = [f"{n.upper()}={sp[n]:.0%}" for n in ["gfs","ecmwf","gem","nws"] if n in sp]
+            la_lines.append(f"`{s.market.market_id}` edge={s.edge:+.0%} [{' '.join(parts)}]")
+        if len(la) > 6:
+            la_lines.append(f"…+{len(la)-6} more")
+        lines.append(f"**Low agreement ({len(la)}):**\n" + "\n".join(la_lines))
+    else:
+        lines.append("**Low agreement:** none")
+
+    # Below edge threshold
+    be = scan_report.below_edge or []
+    if be:
+        be_lines = [f"`{s.market.market_id}` {s.edge:+.1%}" for s in be[:8]]
+        if len(be) > 8:
+            be_lines.append(f"…+{len(be)-8} more")
+        lines.append(f"**Below edge ({len(be)}):** " + "  ".join(be_lines))
+    else:
+        lines.append("**Below edge:** none")
+
+    return "\n".join(lines)
+
+
 def send_daily_summary(
     unique_signals: int,
     actionable_signals: int,
@@ -125,6 +175,7 @@ def send_daily_summary(
     paper_resolved_today: list,
     daily_paper_pnl: float,
     paper_stats: dict,
+    scan_report=None,
 ) -> bool:
     """Send combined end-of-day summary to Discord at 11 PM ET."""
     if not settings.DISCORD_WEBHOOK_URL:
@@ -162,16 +213,29 @@ def send_daily_summary(
     else:
         resolved_text = "None settled today"
 
+    # Filter report — markets scanned vs filtered
+    fr = scan_report.fetch_report if scan_report else None
+    total_raw      = fr.total_raw if fr else 0
+    series_scanned = fr.series_scanned if fr else 0
+    liq_filtered   = len([f for f in fr.filtered if f.reason in ("low_ask","low_volume")]) if fr else 0
+    brackets       = len([f for f in fr.filtered if f.reason == "bracket"]) if fr else 0
+    passed_liq     = len(fr.markets) if fr else 0
+    filter_detail  = _build_filter_report_text(scan_report)
+
     fields = [
-        {"name": "Unique Signals Today", "value": str(unique_signals),        "inline": True},
-        {"name": "Above Threshold",      "value": str(actionable_signals),    "inline": True},
-        {"name": "Paper Trades Logged",  "value": str(len(paper_logged_today)),"inline": True},
+        {"name": "Series Scanned",       "value": str(series_scanned),         "inline": True},
+        {"name": "Raw Markets",          "value": str(total_raw),               "inline": True},
+        {"name": "Passed Liquidity",     "value": str(passed_liq),             "inline": True},
+        {"name": "Unique Signals",       "value": str(unique_signals),         "inline": True},
+        {"name": "Actionable",           "value": f"**{actionable_signals}**", "inline": True},
+        {"name": "Paper Trades Today",   "value": str(len(paper_logged_today)),"inline": True},
         {"name": "Today's P&L",          "value": f"**{pnl_sign}${daily_paper_pnl:.2f}**", "inline": True},
         {"name": "Running P&L",          "value": f"**{running_sign}${running_pnl:.2f}**", "inline": True},
         {"name": "All-time W/L",         "value": f"{wins}W / {losses}L",     "inline": True},
-        {"name": "Brier Score",          "value": brier_str,                  "inline": True},
-        {"name": "New Paper Trades",     "value": logged_text,                "inline": False},
-        {"name": "Resolved Today",       "value": resolved_text,              "inline": False},
+        {"name": "Brier Score",          "value": brier_str,                   "inline": True},
+        {"name": "Filter Breakdown",     "value": filter_detail,               "inline": False},
+        {"name": "New Paper Trades",     "value": logged_text,                 "inline": False},
+        {"name": "Resolved Today",       "value": resolved_text,               "inline": False},
     ]
 
     embed = {

@@ -10,8 +10,29 @@ import re
 from datetime import date
 from typing import Dict, List, Optional, Tuple
 
+from dataclasses import dataclass, field
+
 from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
 from backend.data.weather_markets import WeatherMarket
+
+
+@dataclass
+class FilteredMarket:
+    ticker: str
+    city: str
+    title: str
+    reason: str           # "bracket", "no_price", "low_ask", "low_volume", "expired"
+    ask_size: float = 0.0
+    volume_24h: float = 0.0
+    yes_price: float = 0.0
+
+
+@dataclass
+class MarketFetchReport:
+    markets: list = field(default_factory=list)          # List[WeatherMarket] — passed all filters
+    filtered: list = field(default_factory=list)         # List[FilteredMarket]
+    series_scanned: int = 0
+    total_raw: int = 0
 
 logger = logging.getLogger("weatherbot")
 
@@ -100,6 +121,8 @@ KNOWN_SERIES_MAP: Dict[str, Tuple[str, str]] = {
     "KXRAINSFOM":     ("san_francisco", "rain"),
     "KXRAINDALM":     ("dallas",        "rain"),
     "KXRAINNO":       ("new_orleans",   "rain"),
+    # Monthly / multi-day accumulation rain series — different resolution model, skip for now
+    # "KXRAINNYCM": monthly, not daily binary
 }
 
 # Prefixes we scan — non-weather series with these prefixes are filtered
@@ -268,52 +291,39 @@ def _parse_rain_ticker(ticker: str, city_key: str, title: str = "") -> Optional[
 
 async def fetch_kalshi_weather_markets(
     city_keys: Optional[List[str]] = None,
-) -> List[WeatherMarket]:
+) -> "MarketFetchReport":
     """
     Dynamically discover all active Kalshi weather series and fetch their
-    open binary (T-ticker) markets. Applies liquidity filters.
-
-    city_keys: if provided, only fetch markets for these cities.
+    open binary (T-ticker) markets. Returns a MarketFetchReport with both
+    the passing markets and the full filtered list for the daily report.
     """
+    report = MarketFetchReport()
+
     if not kalshi_credentials_present():
-        return []
+        return report
 
     client = KalshiClient()
     today = date.today()
-    skipped_no_price = 0
-    skipped_bracket = 0
-    skipped_low_liquidity = 0
-    skipped_unknown_city = 0
 
-    # Import here to avoid circular imports
     from backend.data.weather import CITY_CONFIG
 
-    # Discover all active series
     active_series = await discover_active_series(client)
-
-    markets: List[WeatherMarket] = []
+    report.series_scanned = len(active_series)
 
     for series_ticker, city_key, metric in active_series:
         if city_keys and city_key not in city_keys:
             continue
-
-        # Skip cities we don't have weather data for
         if city_key not in CITY_CONFIG:
             logger.debug(f"No weather config for {city_key} ({series_ticker}) — skipping")
-            skipped_unknown_city += 1
             continue
 
-        city_cfg = CITY_CONFIG[city_key]
+        city_cfg  = CITY_CONFIG[city_key]
         city_name = city_cfg["name"]
-        cursor = None
+        cursor    = None
 
         try:
             while True:
-                params: dict = {
-                    "series_ticker": series_ticker,
-                    "status": "open",
-                    "limit": 200,
-                }
+                params: dict = {"series_ticker": series_ticker, "status": "open", "limit": 200}
                 if cursor:
                     params["cursor"] = cursor
 
@@ -323,26 +333,32 @@ async def fetch_kalshi_weather_markets(
                 for m in raw_markets:
                     ticker = m.get("ticker", "")
                     title  = m.get("title", ticker)
+                    report.total_raw += 1
 
-                    # Parse based on metric type
+                    # ── Parse ticker ─────────────────────────────────────────
                     if metric == "rain":
                         parsed = _parse_rain_ticker(ticker, city_key, title)
-                        if not parsed:
-                            skipped_bracket += 1
-                            continue
                     else:
                         if "-B" in ticker:
-                            skipped_bracket += 1
+                            report.filtered.append(FilteredMarket(
+                                ticker=ticker, city=city_key, title=title,
+                                reason="bracket"))
                             continue
                         parsed = _parse_temp_ticker(ticker, city_key, metric, title)
-                        if not parsed:
-                            skipped_bracket += 1
-                            continue
 
-                    if parsed["target_date"] < today:
+                    if not parsed:
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="bracket"))
                         continue
 
-                    # Price resolution
+                    if parsed["target_date"] < today:
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="expired"))
+                        continue
+
+                    # ── Price resolution ──────────────────────────────────────
                     yes_ask_d = m.get("yes_ask_dollars")
                     no_ask_d  = m.get("no_ask_dollars")
                     last_d    = m.get("last_price_dollars")
@@ -359,7 +375,9 @@ async def fetch_kalshi_weather_markets(
                     elif last_c is not None:
                         yes_price = last_c / 100.0
                     else:
-                        skipped_no_price += 1
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="no_price"))
                         continue
 
                     if no_ask_d is not None:
@@ -369,40 +387,39 @@ async def fetch_kalshi_weather_markets(
                     else:
                         no_price = 1.0 - yes_price
 
+                    # Near-certain markets — skip silently
                     if yes_price > 0.97 or yes_price < 0.03:
                         continue
 
-                    # Liquidity filters
+                    # ── Liquidity filters ─────────────────────────────────────
                     yes_ask_size = float(m.get("yes_ask_size_fp") or 0)
                     volume_24h   = float(m.get("volume_24h_fp") or 0)
 
                     if yes_ask_size < MIN_ASK_SIZE:
                         logger.info(
-                            f"LIQUIDITY SKIP {ticker}: ask_size={yes_ask_size:.0f} < {MIN_ASK_SIZE}"
-                        )
-                        skipped_low_liquidity += 1
+                            f"LIQUIDITY SKIP {ticker}: ask_size={yes_ask_size:.0f} < {MIN_ASK_SIZE}")
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="low_ask", ask_size=yes_ask_size,
+                            volume_24h=volume_24h, yes_price=yes_price))
                         continue
 
                     if volume_24h < MIN_VOLUME_24H:
                         logger.info(
-                            f"LIQUIDITY SKIP {ticker}: volume_24h={volume_24h:.0f} < {MIN_VOLUME_24H}"
-                        )
-                        skipped_low_liquidity += 1
+                            f"LIQUIDITY SKIP {ticker}: volume_24h={volume_24h:.0f} < {MIN_VOLUME_24H}")
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="low_volume", ask_size=yes_ask_size,
+                            volume_24h=volume_24h, yes_price=yes_price))
                         continue
 
-                    markets.append(WeatherMarket(
-                        slug=ticker,
-                        market_id=ticker,
-                        platform="kalshi",
-                        title=title,
-                        city_key=city_key,
-                        city_name=city_name,
+                    report.markets.append(WeatherMarket(
+                        slug=ticker, market_id=ticker, platform="kalshi",
+                        title=title, city_key=city_key, city_name=city_name,
                         target_date=parsed["target_date"],
                         threshold_f=parsed["threshold_f"],
-                        metric=parsed["metric"],
-                        direction=parsed["direction"],
-                        yes_price=yes_price,
-                        no_price=no_price,
+                        metric=parsed["metric"], direction=parsed["direction"],
+                        yes_price=yes_price, no_price=no_price,
                         volume=float(m.get("volume", 0) or 0),
                     ))
 
@@ -413,10 +430,12 @@ async def fetch_kalshi_weather_markets(
         except Exception as e:
             logger.warning(f"Failed to fetch Kalshi markets for {series_ticker}: {e}")
 
+    liq_filtered = [f for f in report.filtered if f.reason in ("low_ask", "low_volume")]
     logger.info(
-        f"Found {len(markets)} tradeable Kalshi weather markets across "
-        f"{len({m.city_key for m in markets})} cities "
-        f"(skipped {skipped_bracket} brackets, {skipped_no_price} no-price, "
-        f"{skipped_low_liquidity} low-liquidity, {skipped_unknown_city} unknown-city)"
+        f"Found {len(report.markets)} tradeable markets across "
+        f"{len({m.city_key for m in report.markets})} cities from "
+        f"{report.series_scanned} series "
+        f"(raw={report.total_raw}, liquidity_filtered={len(liq_filtered)}, "
+        f"brackets={sum(1 for f in report.filtered if f.reason=='bracket')})"
     )
-    return markets
+    return report

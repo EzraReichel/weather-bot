@@ -2,7 +2,7 @@
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.config import settings
 from backend.core.probability import (
@@ -46,6 +46,9 @@ class WeatherTradingSignal:
     source_probs: Dict[str, float] = field(default_factory=dict)   # {source: P(YES)}
     agreement: str = "MEDIUM"   # "HIGH", "MEDIUM", "LOW"
     sources_used: List[str] = field(default_factory=list)
+
+    # Set after scan — populated for signals that didn't pass threshold
+    filter_reason: str = ""   # "low_agreement", "below_edge", "entry_price"
 
     @property
     def passes_threshold(self) -> bool:
@@ -269,27 +272,42 @@ async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradin
     )
 
 
-async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
+@dataclass
+class ScanReport:
+    """Full scan output — markets, signals, and what was filtered at each stage."""
+    signals: List[WeatherTradingSignal] = field(default_factory=list)
+    # from MarketFetchReport
+    fetch_report: Any = None   # MarketFetchReport
+    # signal-level filtered (passed liquidity, but signal didn't make threshold)
+    below_edge: List[WeatherTradingSignal] = field(default_factory=list)
+    low_agreement_filtered: List[WeatherTradingSignal] = field(default_factory=list)
+
+    @property
+    def actionable(self) -> List[WeatherTradingSignal]:
+        return [s for s in self.signals if s.passes_threshold]
+
+
+async def scan_for_weather_signals() -> ScanReport:
     """Scan Kalshi weather markets and generate ensemble-of-ensembles signals."""
     from backend.data.kalshi_client import kalshi_credentials_present
-    from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+    from backend.data.kalshi_markets import fetch_kalshi_weather_markets, MarketFetchReport
 
-    city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()]
+    city_keys = [c.strip() for c in settings.WEATHER_CITIES.split(",") if c.strip()] or None
 
     logger.info("=" * 60)
     logger.info("WEATHER SCAN: Fetching Kalshi temperature markets...")
 
-    markets: List[WeatherMarket] = []
+    fetch_report = MarketFetchReport()
     if not kalshi_credentials_present():
         logger.warning("Kalshi credentials not configured — skipping market fetch")
     else:
         try:
-            kalshi_markets = await fetch_kalshi_weather_markets(city_keys)
-            markets.extend(kalshi_markets)
-            logger.info(f"Kalshi: found {len(kalshi_markets)} weather markets")
+            fetch_report = await fetch_kalshi_weather_markets(city_keys)
+            logger.info(f"Kalshi: {len(fetch_report.markets)} markets passed filters")
         except Exception as e:
             logger.error(f"Failed to fetch Kalshi weather markets: {e}", exc_info=True)
 
+    markets = fetch_report.markets
     logger.info(f"Total markets to analyze: {len(markets)}")
 
     signals: List[WeatherTradingSignal] = []
@@ -303,10 +321,25 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
 
     signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
+    # Annotate filter reason on each signal
+    low_agreement_filtered = []
+    below_edge = []
+    for s in signals:
+        if s.passes_threshold:
+            continue
+        req = LOW_CONFIDENCE_EDGE_OVERRIDE if (s.low_confidence_flag or s.agreement == "LOW") else settings.MIN_EDGE_THRESHOLD
+        if s.agreement == "LOW" and abs(s.edge) >= settings.MIN_EDGE_THRESHOLD:
+            s.filter_reason = "low_agreement"
+            low_agreement_filtered.append(s)
+        elif abs(s.edge) < req:
+            s.filter_reason = "below_edge"
+            below_edge.append(s)
+
     actionable = [s for s in signals if s.passes_threshold]
     logger.info(
         f"SCAN COMPLETE: {len(markets)} markets → {len(signals)} signals, "
-        f"{len(actionable)} actionable (edge >= {settings.MIN_EDGE_THRESHOLD:.0%})"
+        f"{len(actionable)} actionable, {len(low_agreement_filtered)} blocked by low agreement, "
+        f"{len(below_edge)} below edge"
     )
     for s in actionable[:5]:
         src_str = "/".join(s.sources_used).upper()
@@ -318,7 +351,14 @@ async def scan_for_weather_signals() -> List[WeatherTradingSignal]:
         )
 
     _persist_signals(signals)
-    return signals
+
+    report = ScanReport(
+        signals=signals,
+        fetch_report=fetch_report,
+        below_edge=below_edge,
+        low_agreement_filtered=low_agreement_filtered,
+    )
+    return report
 
 
 def _persist_signals(signals: List[WeatherTradingSignal]):

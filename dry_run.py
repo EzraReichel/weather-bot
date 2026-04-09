@@ -181,7 +181,7 @@ async def test_signals():
 
     t0 = time.time()
     try:
-        signals = await scan_for_weather_signals()
+        scan = await scan_for_weather_signals()
     except Exception as e:
         fail("signal_generation", f"scan_for_weather_signals raised: {e}")
         traceback.print_exc()
@@ -189,8 +189,9 @@ async def test_signals():
         details["signals_above_threshold"] = 0
         return
 
+    signals = scan.signals
     elapsed = time.time() - t0
-    actionable = [s for s in signals if s.passes_threshold]
+    actionable = scan.actionable
 
     details["signals_found"] = len(signals)
     details["signals_above_threshold"] = len(actionable)
@@ -239,7 +240,7 @@ async def test_edge_cases():
     from backend.data.weather import fetch_ensemble_forecast
     from backend.core.probability import compute_probability
     from backend.notifications.discord import _post_embed
-    from backend.data.kalshi_markets import _parse_kalshi_ticker
+    from backend.data.kalshi_markets import _parse_temp_ticker as _parse_kalshi_ticker
     target = date.today() + timedelta(days=1)
 
     # a) Zero open markets
@@ -247,8 +248,8 @@ async def test_edge_cases():
     try:
         from backend.data.kalshi_markets import fetch_kalshi_weather_markets
         # This should return [] gracefully if no creds or no markets
-        markets = await fetch_kalshi_weather_markets(["nyc"])
-        print(f"     ✅ Returns list of len={len(markets)} (no crash)")
+        report = await fetch_kalshi_weather_markets(["nyc"])
+        print(f"     ✅ Returns report with {len(report.markets)} markets (no crash)")
     except Exception as e:
         print(f"     ❌ Raised: {e}")
         all_ok = False
@@ -315,7 +316,7 @@ async def test_edge_cases():
     # f) Unparseable ticker
     print("  f) Unparseable Kalshi ticker...")
     try:
-        result = _parse_kalshi_ticker("GARBAGE-TICKER-HERE", "nyc", "high")
+        result = _parse_kalshi_ticker("GARBAGE-TICKER-HERE", "nyc", "high", "")
         if result is None:
             print("     ✅ Returns None for bad ticker (no crash)")
         else:
