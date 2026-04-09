@@ -1,10 +1,11 @@
 """Paper trading engine — log signals, settle via NWS observed temps."""
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from backend.config import settings
-from backend.models.paper_trade import PaperSessionLocal, PaperTrade, init_paper_db
+from backend.models.paper_trade import PaperSessionLocal, PaperTrade, ModelCityAccuracy, init_paper_db
 
 # ── DB init guard ─────────────────────────────────────────────────────────────
 _db_initialized = False
@@ -52,6 +53,7 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
             side             = signal.direction,
             market_direction = market.direction,
             agreement        = getattr(signal, "agreement", "MEDIUM"),
+            model_probs      = json.dumps(getattr(signal, "source_probs", {})),
             model_prob       = signal.model_probability,
             market_price     = signal.market_probability,
             edge             = signal.edge,
@@ -155,6 +157,37 @@ async def settle_paper_trades() -> List[PaperTrade]:
             pt.resolved_at   = datetime.utcnow()
             settled.append(pt)
 
+            # YES resolved = 1.0 if YES condition was true, else 0.0
+            if pt.market_direction == "above":
+                yes_outcome = 1.0 if actual_temp > pt.threshold_f else 0.0
+            else:
+                yes_outcome = 1.0 if actual_temp < pt.threshold_f else 0.0
+
+            # Update per-model city accuracy
+            try:
+                model_probs: dict = json.loads(pt.model_probs or "{}")
+                for model_name, model_p in model_probs.items():
+                    row = db.query(ModelCityAccuracy).filter(
+                        ModelCityAccuracy.model  == model_name,
+                        ModelCityAccuracy.city   == pt.city,
+                        ModelCityAccuracy.metric == pt.metric,
+                    ).first()
+                    if not row:
+                        row = ModelCityAccuracy(
+                            model=model_name, city=pt.city, metric=pt.metric,
+                            n=0, brier_sum=0.0, wins=0, losses=0,
+                        )
+                        db.add(row)
+                    row.n         += 1
+                    row.brier_sum += (model_p - yes_outcome) ** 2
+                    if (model_p > 0.5) == (yes_outcome == 1.0):
+                        row.wins += 1
+                    else:
+                        row.losses += 1
+                    row.updated_at = datetime.utcnow()
+            except Exception as e:
+                logger.debug(f"Failed to update model accuracy for {pt.ticker}: {e}")
+
             icon = "✅" if result == "win" else "❌"
             logger.info(
                 f"{icon} PAPER SETTLED: {pt.ticker}  {result.upper()}  "
@@ -174,6 +207,28 @@ async def settle_paper_trades() -> List[PaperTrade]:
 
 
 # ── Stats helper (used by report.py and daily summary) ───────────────────────
+
+def get_model_accuracy(db=None) -> list:
+    """Return per-model, per-city accuracy rows sorted by Brier score."""
+    _ensure_db()
+    close_after = db is None
+    if db is None:
+        db = PaperSessionLocal()
+    try:
+        rows = db.query(ModelCityAccuracy).all()
+        result = []
+        for r in rows:
+            brier = r.brier_sum / r.n if r.n > 0 else None
+            result.append({
+                "model": r.model, "city": r.city, "metric": r.metric,
+                "n": r.n, "brier": brier,
+                "wins": r.wins, "losses": r.losses,
+            })
+        return sorted(result, key=lambda x: (x["model"], x["city"]))
+    finally:
+        if close_after:
+            db.close()
+
 
 def get_paper_stats(db=None):
     """Return a dict of aggregate paper trading statistics."""

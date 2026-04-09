@@ -27,6 +27,7 @@ class PaperTrade(PaperBase):
     side            = Column(String)                       # "yes" or "no"
     market_direction = Column(String)                      # "above" or "below" (market definition)
     agreement        = Column(String, default="MEDIUM")    # "HIGH", "MEDIUM", "LOW" — for calibration
+    model_probs      = Column(String, nullable=True)        # JSON: {"gfs": 0.72, "ecmwf": 0.68, ...}
 
     # Signal details at entry
     model_prob      = Column(Float)
@@ -53,16 +54,39 @@ class PaperTrade(PaperBase):
     resolved_at     = Column(DateTime, nullable=True)
 
 
+class ModelCityAccuracy(PaperBase):
+    """Tracks per-model, per-city Brier score and win rate as trades settle."""
+    __tablename__ = "model_city_accuracy"
+
+    id         = Column(Integer, primary_key=True)
+    model      = Column(String, index=True)   # "gfs", "ecmwf", "gem", "nws"
+    city       = Column(String, index=True)
+    metric     = Column(String)               # "high" or "low"
+    n          = Column(Integer, default=0)   # trades settled
+    brier_sum  = Column(Float, default=0.0)   # sum of (model_prob - actual_outcome)^2
+    wins       = Column(Integer, default=0)
+    losses     = Column(Integer, default=0)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+
 def init_paper_db():
     PaperBase.metadata.create_all(bind=paper_engine)
-    # Migrate: add agreement column if missing (for existing DBs)
+    _migrate()
+
+
+def _migrate():
+    """Add columns introduced after initial schema without dropping the DB."""
     from sqlalchemy import inspect, text
     inspector = inspect(paper_engine)
     try:
         cols = [c["name"] for c in inspector.get_columns("paper_trades")]
-        if "agreement" not in cols:
-            with paper_engine.connect() as conn:
-                with conn.begin():
-                    conn.execute(text("ALTER TABLE paper_trades ADD COLUMN agreement VARCHAR DEFAULT 'MEDIUM'"))
+        with paper_engine.connect() as conn:
+            for col, typedef in [
+                ("agreement",   "VARCHAR DEFAULT 'MEDIUM'"),
+                ("model_probs", "TEXT"),
+            ]:
+                if col not in cols:
+                    with conn.begin():
+                        conn.execute(text(f"ALTER TABLE paper_trades ADD COLUMN {col} {typedef}"))
     except Exception:
         pass

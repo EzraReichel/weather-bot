@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from backend.models.paper_trade import init_paper_db, PaperSessionLocal, PaperTrade
-from backend.core.paper_trading import get_paper_stats
+from backend.core.paper_trading import get_paper_stats, get_model_accuracy
 
 SEP  = "─" * 62
 SEP2 = "═" * 62
@@ -119,6 +119,20 @@ def main():
         ) / len(resolved)
         print(f"\n  Brier Score: {brier:.4f}")
         print(f"  (0.00 = perfect calibration  |  0.25 = random guessing)")
+
+    # ── Per-model city accuracy ───────────────────────────────────────────────
+    accuracy = get_model_accuracy()
+    if accuracy:
+        print(f"\n{SEP}")
+        print("  PER-MODEL CITY ACCURACY  (which model is best where?)")
+        print(SEP)
+        print(f"  {'Model':<8} {'City':<16} {'Metric':<6} {'N':>4} {'W':>4} {'L':>4}  {'Brier':>7}")
+        print(f"  {'─────':<8} {'────':<16} {'──────':<6} {'─':>4} {'─':>4} {'─':>4}  {'─────':>7}")
+        for r in accuracy:
+            if r["n"] == 0:
+                continue
+            brier_str = f"{r['brier']:.4f}" if r["brier"] is not None else "  n/a"
+            print(f"  {r['model']:<8} {r['city']:<16} {r['metric']:<6} {r['n']:>4} {r['wins']:>4} {r['losses']:>4}  {brier_str:>7}")
 
     print(f"\n{SEP2}\n")
 
