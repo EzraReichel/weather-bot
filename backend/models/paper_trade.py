@@ -26,6 +26,7 @@ class PaperTrade(PaperBase):
     threshold_f     = Column(Float)                        # temperature threshold
     side            = Column(String)                       # "yes" or "no"
     market_direction = Column(String)                      # "above" or "below" (market definition)
+    agreement        = Column(String, default="MEDIUM")    # "HIGH", "MEDIUM", "LOW" — for calibration
 
     # Signal details at entry
     model_prob      = Column(Float)
@@ -54,3 +55,14 @@ class PaperTrade(PaperBase):
 
 def init_paper_db():
     PaperBase.metadata.create_all(bind=paper_engine)
+    # Migrate: add agreement column if missing (for existing DBs)
+    from sqlalchemy import inspect, text
+    inspector = inspect(paper_engine)
+    try:
+        cols = [c["name"] for c in inspector.get_columns("paper_trades")]
+        if "agreement" not in cols:
+            with paper_engine.connect() as conn:
+                with conn.begin():
+                    conn.execute(text("ALTER TABLE paper_trades ADD COLUMN agreement VARCHAR DEFAULT 'MEDIUM'"))
+    except Exception:
+        pass

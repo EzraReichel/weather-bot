@@ -51,6 +51,7 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
             threshold_f      = market.threshold_f,
             side             = signal.direction,
             market_direction = market.direction,
+            agreement        = getattr(signal, "agreement", "MEDIUM"),
             model_prob       = signal.model_probability,
             market_price     = signal.market_probability,
             edge             = signal.edge,
@@ -211,6 +212,17 @@ def get_paper_stats(db=None):
                 c["losses"] += 1
             c["pnl"] += t.pnl or 0.0
 
+        # Agreement breakdown
+        agreement_levels = {}
+        for t in resolved:
+            lvl = getattr(t, "agreement", "MEDIUM") or "MEDIUM"
+            a = agreement_levels.setdefault(lvl, {"wins": 0, "losses": 0, "pnl": 0.0})
+            if t.result == "win":
+                a["wins"] += 1
+            else:
+                a["losses"] += 1
+            a["pnl"] += t.pnl or 0.0
+
         return {
             "total":      len(all_trades),
             "resolved":   len(resolved),
@@ -221,6 +233,7 @@ def get_paper_stats(db=None):
             "avg_edge":   avg_edge,
             "brier":      brier,
             "cities":     cities,
+            "agreement_levels": agreement_levels,
             "all_trades": all_trades,
             "resolved_trades": resolved,
         }

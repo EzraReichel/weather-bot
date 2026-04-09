@@ -58,6 +58,20 @@ def main():
             pnl_sign = "+" if c["pnl"] >= 0 else ""
             print(f"  {city:<16} {c['wins']:>4} {c['losses']:>4}  {pnl_sign}${c['pnl']:>8.2f}")
 
+    # ── Agreement breakdown ───────────────────────────────────────────────────
+    if s.get("agreement_levels"):
+        print(f"\n{SEP}")
+        print("  BY AGREEMENT LEVEL  (key: does LOW agreement actually lose more?)")
+        print(SEP)
+        print(f"  {'Level':<10} {'W':>4} {'L':>4}  {'P&L':>10}")
+        print(f"  {'─────':<10} {'─':>4} {'─':>4}  {'───':>10}")
+        for lvl in ["HIGH", "MEDIUM", "LOW"]:
+            if lvl not in s["agreement_levels"]:
+                continue
+            a = s["agreement_levels"][lvl]
+            sign = "+" if a["pnl"] >= 0 else ""
+            print(f"  {lvl:<10} {a['wins']:>4} {a['losses']:>4}  {sign}${a['pnl']:>8.2f}")
+
     # ── Trade log ─────────────────────────────────────────────────────────
     print(f"\n{SEP}")
     print("  FULL TRADE LOG")
@@ -74,7 +88,8 @@ def main():
             print(f"    City:       {t.city}  |  Metric: {t.metric.upper()}")
             print(f"    Side:       {side_str}")
             print(f"    Entry:      {t.contracts} contracts @ {t.entry_price:.2%}  (${t.kelly_size:.0f} Kelly)")
-            print(f"    Signal:     model={t.model_prob:.1%}  market={t.market_price:.1%}  edge={t.edge:+.1%}  conf={t.confidence:.0%}")
+            agr = getattr(t, "agreement", "MEDIUM") or "MEDIUM"
+            print(f"    Signal:     model={t.model_prob:.1%}  market={t.market_price:.1%}  edge={t.edge:+.1%}  conf={t.confidence:.0%}  agreement={agr}")
             print(f"    Forecast:   mean={t.forecast_mean:.1f}°F  std={t.forecast_std:.1f}°F")
             print(f"    Logged:     {t.created_at.strftime('%Y-%m-%d %H:%M')} UTC  |  Resolves: {t.resolution_date}")
             print(f"    Result:     {fmt_result(t)}  |  {pnl_str}")

@@ -46,13 +46,25 @@ async def weather_scan_job():
         # Store latest scan report for daily summary
         _latest_scan_report = scan
 
-        # Log paper trades and send Discord alerts for new actionable signals
+        # Paper trade ALL signals above 8% edge regardless of agreement level
+        # Discord alert only signals that pass the live threshold (15% for LOW agreement)
         from backend.core.paper_trading import log_paper_trade
         from backend.notifications.discord import send_paper_trade_alert
 
-        for signal in actionable:
+        paper_candidates = [s for s in scan.signals if s.passes_paper_threshold]
+
+        for signal in paper_candidates:
             ticker = signal.market.market_id
             trade = log_paper_trade(signal)
+
+            # Only alert if above the live trading threshold
+            if not signal.passes_threshold:
+                if trade:
+                    logger.info(
+                        f"📝 PAPER ONLY (LOW agreement) {ticker}  "
+                        f"edge={signal.edge:+.1%}  agreement={signal.agreement}"
+                    )
+                continue
 
             last_alerted = _alerted_tickers.get(ticker)
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
@@ -68,8 +80,13 @@ async def weather_scan_job():
                 except Exception as e:
                     logger.error(f"Failed to send Discord alert for {ticker}: {e}")
 
-        if settings.DRY_RUN and actionable:
-            logger.info(f"🔒 DRY RUN — logged {len(actionable)} paper trade(s), no real orders placed")
+        if settings.DRY_RUN and paper_candidates:
+            live_count = len([s for s in paper_candidates if s.passes_threshold])
+            paper_only = len(paper_candidates) - live_count
+            logger.info(
+                f"🔒 DRY RUN — {len(paper_candidates)} paper trade(s) logged "
+                f"({live_count} live-threshold, {paper_only} paper-only LOW agreement)"
+            )
 
         # Update bot state
         db = SessionLocal()

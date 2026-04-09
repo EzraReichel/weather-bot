@@ -51,7 +51,13 @@ class WeatherTradingSignal:
     filter_reason: str = ""   # "low_agreement", "below_edge", "entry_price"
 
     @property
+    def passes_paper_threshold(self) -> bool:
+        """Always just MIN_EDGE_THRESHOLD — used for paper trading to capture all signals."""
+        return abs(self.edge) >= settings.MIN_EDGE_THRESHOLD
+
+    @property
     def passes_threshold(self) -> bool:
+        """Live trading threshold — raises bar to 15% for LOW agreement signals."""
         edge_threshold = settings.MIN_EDGE_THRESHOLD
         if self.low_confidence_flag or self.agreement == "LOW":
             edge_threshold = max(edge_threshold, LOW_CONFIDENCE_EDGE_OVERRIDE)
