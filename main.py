@@ -46,6 +46,15 @@ async def health():
     return JSONResponse({"status": "ok"})
 
 
+@app.post("/report")
+@app.get("/report")
+async def trigger_report():
+    """Post a full paper trading report to Discord. Hit from anywhere."""
+    from backend.notifications.discord import send_paper_report
+    ok = send_paper_report()
+    return JSONResponse({"sent": ok})
+
+
 @app.get("/app.jsx")
 async def serve_jsx():
     """Serve the JSX component with correct MIME type for Babel standalone."""

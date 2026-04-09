@@ -325,6 +325,185 @@ def send_paper_trade_alert(signal, trade) -> bool:
 
 
 
+def send_paper_report() -> bool:
+    """Post a full paper trading report to Discord on demand."""
+    if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    from backend.core.paper_trading import get_paper_stats, get_model_accuracy
+
+    s = get_paper_stats()
+    accuracy = get_model_accuracy()
+
+    total    = s["total"]
+    resolved = s["resolved"]
+    pending  = s["unresolved"]
+    wins     = s["wins"]
+    losses   = s["losses"]
+    pnl      = s["total_pnl"]
+    brier    = s["brier"]
+    avg_edge = s["avg_edge"]
+
+    pnl_sign    = "+" if pnl >= 0 else ""
+    color       = COLOR_GREEN if pnl >= 0 else COLOR_RED
+    win_rate    = f"{wins/(resolved)*100:.0f}%" if resolved > 0 else "n/a"
+    brier_str   = f"{brier:.4f}" if brier is not None else "n/a"
+
+    # Active trades list
+    active = s["all_trades"]
+    pending_trades = [t for t in active if not t.resolved]
+    resolved_trades = sorted(
+        [t for t in active if t.resolved],
+        key=lambda t: t.resolved_at or datetime.utcnow(),
+        reverse=True,
+    )
+
+    if pending_trades:
+        pending_lines = [
+            f"`{t.ticker}` {t.side.upper()} edge={t.edge:+.0%} [{getattr(t,'agreement','?')}]"
+            for t in pending_trades[:10]
+        ]
+        if len(pending_trades) > 10:
+            pending_lines.append(f"…+{len(pending_trades)-10} more")
+        pending_text = "\n".join(pending_lines)
+    else:
+        pending_text = "None"
+
+    if resolved_trades:
+        resolved_lines = []
+        for t in resolved_trades[:8]:
+            icon = "✅" if t.result == "win" else "❌"
+            resolved_lines.append(
+                f"{icon} `{t.ticker}` {t.actual_temp:.1f}°F vs {t.threshold_f:.0f}°F  ${t.pnl:+.2f}"
+            )
+        if len(resolved_trades) > 8:
+            resolved_lines.append(f"…+{len(resolved_trades)-8} more")
+        resolved_text = "\n".join(resolved_lines)
+    else:
+        resolved_text = "None resolved yet"
+
+    # Agreement breakdown
+    agr = s.get("agreement_levels", {})
+    agr_lines = []
+    for lvl in ["HIGH", "MEDIUM", "LOW"]:
+        if lvl in agr:
+            a = agr[lvl]
+            sign = "+" if a["pnl"] >= 0 else ""
+            agr_lines.append(f"**{lvl}**: {a['wins']}W/{a['losses']}L  {sign}${a['pnl']:.2f}")
+    agr_text = "  |  ".join(agr_lines) if agr_lines else "No resolved trades yet"
+
+    # Top model accuracy rows
+    if accuracy:
+        acc_lines = []
+        for r in accuracy[:8]:
+            if r["n"] == 0:
+                continue
+            b = f"{r['brier']:.3f}" if r["brier"] else "n/a"
+            acc_lines.append(f"`{r['model']}/{r['city'][:6]}`: Brier={b} ({r['wins']}W/{r['losses']}L)")
+        acc_text = "\n".join(acc_lines) if acc_lines else "No settled trades yet"
+    else:
+        acc_text = "No settled trades yet"
+
+    fields = [
+        {"name": "Total Trades",      "value": str(total),                    "inline": True},
+        {"name": "Resolved",          "value": str(resolved),                  "inline": True},
+        {"name": "Pending",           "value": str(pending),                   "inline": True},
+        {"name": "W/L",               "value": f"{wins}W / {losses}L ({win_rate})", "inline": True},
+        {"name": "Running P&L",       "value": f"**{pnl_sign}${pnl:.2f}**",  "inline": True},
+        {"name": "Avg Edge at Entry", "value": f"{avg_edge:+.1%}",            "inline": True},
+        {"name": "Brier Score",       "value": brier_str,                     "inline": True},
+        {"name": "Agreement Breakdown", "value": agr_text,                    "inline": False},
+        {"name": f"Active Trades ({len(pending_trades)})", "value": pending_text, "inline": False},
+        {"name": f"Resolved ({len(resolved_trades)})",     "value": resolved_text, "inline": False},
+        {"name": "Model Accuracy",    "value": acc_text,                      "inline": False},
+    ]
+
+    embed = {
+        "title": "📊 Paper Trading Report",
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "Kalshi Weather Arb Bot · On-Demand Report"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    success = _post_embed(embed)
+    if success:
+        logger.info("Discord paper report sent")
+    return success
+
+
+def poll_discord_commands() -> bool:
+    """
+    Poll the Discord channel for messages containing 'report' (case-insensitive).
+    Posts a full paper report for each matching message, then acknowledges via reaction.
+
+    Requires DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID in settings.
+    Returns True if any commands were processed.
+    """
+    token      = settings.DISCORD_BOT_TOKEN
+    channel_id = settings.DISCORD_CHANNEL_ID
+    if not token or not channel_id:
+        return False
+
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        # Fetch recent messages
+        resp = requests.get(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            headers=headers,
+            params={"limit": 20},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logger.warning(f"Discord message poll returned {resp.status_code}")
+            return False
+
+        messages = resp.json()
+        processed = False
+
+        for msg in messages:
+            msg_id      = msg.get("id", "")
+            content     = msg.get("content", "").strip().lower()
+            author      = msg.get("author", {})
+            is_bot      = author.get("bot", False)
+
+            if is_bot:
+                continue
+            if content not in ("report", "!report", "/report"):
+                continue
+
+            # Check if already reacted (avoid re-processing)
+            reactions = msg.get("reactions", [])
+            already_done = any(
+                r.get("emoji", {}).get("name") == "✅" and r.get("me", False)
+                for r in reactions
+            )
+            if already_done:
+                continue
+
+            # Post the report
+            send_paper_report()
+
+            # Add ✅ reaction to mark as handled
+            requests.put(
+                f"https://discord.com/api/v10/channels/{channel_id}/messages/{msg_id}/reactions/✅/@me",
+                headers=headers,
+                timeout=10,
+            )
+            processed = True
+            logger.info(f"Processed Discord 'report' command from {author.get('username','?')}")
+
+        return processed
+
+    except Exception as e:
+        logger.warning(f"Discord command poll failed: {e}")
+        return False
+
+
 def send_startup_message(simulation_mode: bool, bankroll: float) -> bool:
     """Send a startup notification."""
     if not settings.DISCORD_WEBHOOK_URL:

@@ -32,7 +32,6 @@ async def weather_scan_job():
 
     try:
         from backend.core.weather_signals import scan_for_weather_signals
-        from backend.notifications.discord import send_signal_alert
 
         scan = await scan_for_weather_signals()
         actionable = scan.actionable
@@ -46,8 +45,7 @@ async def weather_scan_job():
         # Store latest scan report for daily summary
         _latest_scan_report = scan
 
-        # Paper trade ALL signals above 8% edge regardless of agreement level
-        # Discord alert only signals that pass the live threshold (15% for LOW agreement)
+        # Paper trade ALL signals >= 8% edge; send Discord alert for every NEW paper trade
         from backend.core.paper_trading import log_paper_trade
         from backend.notifications.discord import send_paper_trade_alert
 
@@ -57,35 +55,24 @@ async def weather_scan_job():
             ticker = signal.market.market_id
             trade = log_paper_trade(signal)
 
-            # Only alert if above the live trading threshold
-            if not signal.passes_threshold:
-                if trade:
-                    logger.info(
-                        f"📝 PAPER ONLY (LOW agreement) {ticker}  "
-                        f"edge={signal.edge:+.1%}  agreement={signal.agreement}"
-                    )
-                continue
+            if trade is None:
+                continue   # already logged (dedup) — no alert
 
+            # New paper trade — always send Discord alert regardless of agreement
             last_alerted = _alerted_tickers.get(ticker)
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
-            already_alerted = last_alerted is not None and last_alerted > alert_cutoff
-
-            if not already_alerted:
+            if last_alerted is None or last_alerted <= alert_cutoff:
                 try:
-                    if trade is not None:
-                        send_paper_trade_alert(signal, trade)
-                    else:
-                        send_signal_alert(signal)
+                    send_paper_trade_alert(signal, trade)
                     _alerted_tickers[ticker] = datetime.utcnow()
                 except Exception as e:
                     logger.error(f"Failed to send Discord alert for {ticker}: {e}")
 
-        if settings.DRY_RUN and paper_candidates:
-            live_count = len([s for s in paper_candidates if s.passes_threshold])
-            paper_only = len(paper_candidates) - live_count
+        if paper_candidates:
             logger.info(
-                f"🔒 DRY RUN — {len(paper_candidates)} paper trade(s) logged "
-                f"({live_count} live-threshold, {paper_only} paper-only LOW agreement)"
+                f"🔒 DRY RUN — {len(paper_candidates)} paper trade(s) evaluated "
+                f"({sum(1 for s in paper_candidates if s.passes_threshold)} live-threshold, "
+                f"{sum(1 for s in paper_candidates if not s.passes_threshold)} low-agreement)"
             )
 
         # Update bot state
@@ -134,6 +121,15 @@ async def settlement_job():
 
     except Exception as e:
         logger.error(f"Settlement error: {e}", exc_info=True)
+
+
+async def discord_command_poll_job():
+    """Poll Discord channel every 60s for 'report' commands."""
+    try:
+        from backend.notifications.discord import poll_discord_commands
+        poll_discord_commands()
+    except Exception as e:
+        logger.error(f"Discord command poll error: {e}", exc_info=True)
 
 
 async def paper_settlement_job():
@@ -248,6 +244,15 @@ def start_scheduler():
         settlement_job,
         IntervalTrigger(minutes=30),
         id="settlement",
+        replace_existing=True,
+        max_instances=1,
+    )
+
+    # Discord command poll every 60 seconds
+    scheduler.add_job(
+        discord_command_poll_job,
+        IntervalTrigger(seconds=60),
+        id="discord_poll",
         replace_existing=True,
         max_instances=1,
     )

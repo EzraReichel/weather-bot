@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     # Discord
     DISCORD_WEBHOOK_URL: Optional[str] = None
+    DISCORD_BOT_TOKEN: Optional[str] = None    # Bot token for reading messages (optional)
+    DISCORD_CHANNEL_ID: Optional[str] = None   # Channel ID to poll for commands
 
     # Bot settings
     SIMULATION_MODE: bool = True
