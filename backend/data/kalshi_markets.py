@@ -36,7 +36,7 @@ class MarketFetchReport:
 
 logger = logging.getLogger("weatherbot")
 
-MIN_ASK_SIZE   = 50     # minimum contracts on the yes ask
+MIN_ASK_SIZE   = 25     # minimum contracts on the yes ask
 MIN_VOLUME_24H = 200    # minimum 24h volume ($1 face value per contract)
                         # Lower than original 1000 to include next-day markets that haven't
                         # fully traded yet but have real ask depth
