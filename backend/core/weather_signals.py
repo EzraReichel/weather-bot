@@ -46,6 +46,7 @@ class WeatherTradingSignal:
     source_probs: Dict[str, float] = field(default_factory=dict)   # {source: P(YES)}
     agreement: str = "MEDIUM"   # "HIGH", "MEDIUM", "LOW"
     sources_used: List[str] = field(default_factory=list)
+    outlier_dampened: Optional[str] = None   # model name if outlier dampening was applied
 
     # Set after scan — populated for signals that didn't pass threshold
     filter_reason: str = ""   # "low_agreement", "below_edge", "entry_price"
@@ -149,14 +150,17 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         sources_used      = list(multi_result.source_probs.keys())
 
         sp = multi_result.source_probs
+        wt = multi_result.weights_used
         parts = []
         for name in ["gfs", "ecmwf", "gem", "nws"]:
             if name in sp:
-                parts.append(f"{name.upper()}={sp[name].prob:.0%}")
+                dampened = "⚡" if name == multi_result.outlier_dampened else ""
+                parts.append(f"{name.upper()}={sp[name].prob:.0%}(w={wt.get(name,0):.2f}{dampened})")
         reasoning_sources = (
             f"Combined({multi_result.combined_prob:.0%}) "
             f"[{' | '.join(parts)}] "
             f"spread={multi_result.max_spread:.0%} agreement={agreement}"
+            + (f" outlier_dampened={multi_result.outlier_dampened}" if multi_result.outlier_dampened else "")
         )
 
     market_yes_prob = market.yes_price
@@ -221,6 +225,7 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         source_probs=source_probs_map,
         agreement=agreement,
         sources_used=sources_used,
+        outlier_dampened=multi_result.outlier_dampened if multi_result else None,
     )
 
 

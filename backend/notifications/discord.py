@@ -63,13 +63,17 @@ def send_signal_alert(signal) -> bool:
     # Per-source probability breakdown
     sp = getattr(signal, "source_probs", {})
     agreement = getattr(signal, "agreement", "MEDIUM")
+    outlier = getattr(signal, "outlier_dampened", None)
     agreement_icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(agreement, "🟡")
 
     source_parts = []
     for name in ["gfs", "ecmwf", "gem", "nws"]:
         if name in sp:
-            source_parts.append(f"{name.upper()}: {sp[name]:.0%}")
+            tag = " ⚡dampened" if name == outlier else ""
+            source_parts.append(f"{name.upper()}: {sp[name]:.0%}{tag}")
     source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
+    if outlier:
+        source_breakdown += f"\n*{outlier.upper()} weight halved (outlier >40% from others)*"
 
     fields = [
         {"name": "Ticker",        "value": f"`{market.market_id}`",           "inline": True},
@@ -268,11 +272,16 @@ def send_paper_trade_alert(signal, trade) -> bool:
 
     sp = getattr(signal, "source_probs", {})
     agreement = getattr(signal, "agreement", "MEDIUM")
+    outlier = getattr(signal, "outlier_dampened", None)
     agreement_icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(agreement, "🟡")
-    source_parts = [
-        f"{n.upper()}: {sp[n]:.0%}" for n in ["gfs", "ecmwf", "gem", "nws"] if n in sp
-    ]
+    source_parts = []
+    for n in ["gfs", "ecmwf", "gem", "nws"]:
+        if n in sp:
+            tag = " ⚡" if n == outlier else ""
+            source_parts.append(f"{n.upper()}: {sp[n]:.0%}{tag}")
     source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
+    if outlier:
+        source_breakdown += f"\n*{outlier.upper()} dampened (outlier)*"
 
     fields = [
         {"name": "Ticker",        "value": f"`{market.market_id}`",              "inline": True},

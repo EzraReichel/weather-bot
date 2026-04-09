@@ -119,11 +119,13 @@ SOURCE_WEIGHTS: Dict[str, float] = {
     "gem":   0.15,   # Additional independent signal
 }
 
-# Maximum probability spread (absolute) within which sources "agree"
-AGREEMENT_TIGHT = 0.10   # all within 10% → HIGH
-AGREEMENT_LOOSE = 0.20   # any pair > 20% → LOW
+# Agreement thresholds
+AGREEMENT_TIGHT    = 0.10   # all sources within 10% → HIGH
+MAJORITY_BAND      = 0.15   # 3 of 4 within 15% of each other → MEDIUM (not LOW)
+OUTLIER_THRESHOLD  = 0.40   # source >40% from the other 3's median → outlier
+OUTLIER_DAMPEN     = 0.50   # reduce outlier weight by this fraction
 
-# Edge threshold override when models disagree badly
+# Edge threshold override when models genuinely split 2v2
 LOW_CONFIDENCE_EDGE_OVERRIDE = 0.15
 
 
@@ -145,8 +147,9 @@ class MultiSourceResult:
     source_probs: Dict[str, SourceProbability]     # per-source breakdown
     agreement: str                                  # "HIGH", "MEDIUM", "LOW"
     max_spread: float                               # max pairwise probability spread
-    weights_used: Dict[str, float]                  # normalised weights actually applied
-    low_confidence_flag: bool                       # True if agreement == LOW
+    weights_used: Dict[str, float]                  # normalised weights actually applied (after outlier dampening)
+    low_confidence_flag: bool                       # True if agreement == LOW (genuine 2v2 split)
+    outlier_dampened: Optional[str] = None          # source name if outlier dampening was applied
     # For backwards compat with single-source pipeline
     ensemble_mean: float = 0.0
     ensemble_std: float  = 0.0
@@ -207,40 +210,67 @@ def compute_multi_source_probability(
     if not source_probs:
         return None
 
-    # Normalise weights to available sources
-    raw_weights = {k: SOURCE_WEIGHTS.get(k, 0.0) for k in source_probs}
-    total_w = sum(raw_weights.values())
-    if total_w <= 0:
-        total_w = len(source_probs)
-        raw_weights = {k: 1.0 for k in source_probs}
-    norm_weights = {k: v / total_w for k, v in raw_weights.items()}
-
-    combined = sum(source_probs[k].prob * norm_weights[k] for k in source_probs)
-    combined = max(0.05, min(0.95, combined))
-
-    # Agreement assessment
-    probs = [sp.prob for sp in source_probs.values()]
+    names  = list(source_probs.keys())
+    probs  = [source_probs[k].prob for k in names]
     max_spread = max(probs) - min(probs)
 
-    if len(probs) >= 4 and max_spread <= AGREEMENT_TIGHT:
-        agreement = "HIGH"
-    elif max_spread >= AGREEMENT_LOOSE:
-        agreement = "LOW"
-    else:
-        # Check if at least 3/4 are within tight band
-        sorted_probs = sorted(probs)
-        tight_windows = [
-            sorted_probs[i+2] - sorted_probs[i]
-            for i in range(len(sorted_probs) - 2)
-        ]
-        if tight_windows and min(tight_windows) <= AGREEMENT_TIGHT:
-            agreement = "MEDIUM"
-        else:
-            agreement = "MEDIUM"  # default to MEDIUM for 2-3 sources
+    # ── Outlier detection and weight dampening ────────────────────────────────
+    # If one source is >OUTLIER_THRESHOLD away from the median of the other 3,
+    # cut its weight by OUTLIER_DAMPEN and redistribute to the agreeing models.
+    outlier_dampened: Optional[str] = None
+    raw_weights = {k: SOURCE_WEIGHTS.get(k, 1.0 / len(names)) for k in names}
 
+    if len(names) >= 3:
+        import statistics as _stat
+        for name in names:
+            others = [source_probs[k].prob for k in names if k != name]
+            others_median = _stat.median(others)
+            if abs(source_probs[name].prob - others_median) >= OUTLIER_THRESHOLD:
+                # This source is a clear outlier — dampen its weight
+                saved = raw_weights[name] * OUTLIER_DAMPEN
+                raw_weights[name] -= saved
+                # Redistribute evenly to the other (agreeing) sources
+                per_other = saved / len(others)
+                for k in names:
+                    if k != name:
+                        raw_weights[k] += per_other
+                outlier_dampened = name
+                logger.debug(
+                    f"Outlier dampening: {name} prob={source_probs[name].prob:.0%} "
+                    f"vs others median={others_median:.0%} "
+                    f"— weight reduced {SOURCE_WEIGHTS.get(name,0):.2f}→{raw_weights[name]:.2f}"
+                )
+                break   # at most one outlier per signal
+
+    total_w = sum(raw_weights.values())
+    norm_weights = {k: v / total_w for k, v in raw_weights.items()}
+
+    combined = sum(source_probs[k].prob * norm_weights[k] for k in names)
+    combined = max(0.05, min(0.95, combined))
+
+    # ── Agreement assessment (majority-rules) ─────────────────────────────────
+    # HIGH:   all sources within AGREEMENT_TIGHT (10%)
+    # MEDIUM: 3 of 4 within MAJORITY_BAND (15%) of each other
+    # LOW:    genuine 2v2 split — no 3-source cluster within MAJORITY_BAND
+
+    if max_spread <= AGREEMENT_TIGHT:
+        agreement = "HIGH"
+    elif len(names) < 3:
+        agreement = "MEDIUM"
+    else:
+        # Check for 3-source majority cluster within MAJORITY_BAND
+        sorted_probs = sorted(probs)
+        majority_found = False
+        if len(sorted_probs) >= 3:
+            for i in range(len(sorted_probs) - 2):
+                if sorted_probs[i + 2] - sorted_probs[i] <= MAJORITY_BAND:
+                    majority_found = True
+                    break
+        agreement = "MEDIUM" if majority_found else "LOW"
+
+    # LOW only means genuine 2v2 split (or worse) — not just one outlier
     low_confidence_flag = (agreement == "LOW")
 
-    # Backwards-compat fields: use GFS as reference for mean/std, else first available
     ref = source_probs.get("gfs") or next(iter(source_probs.values()))
     confidence = max(0.3, min(0.95, 1.0 - (ref.std / 10.0)))
     if agreement == "HIGH":
@@ -255,9 +285,10 @@ def compute_multi_source_probability(
         max_spread=max_spread,
         weights_used=norm_weights,
         low_confidence_flag=low_confidence_flag,
+        outlier_dampened=outlier_dampened,
         ensemble_mean=ref.mean,
         ensemble_std=ref.std,
-        ensemble_fraction=combined,    # approximation
+        ensemble_fraction=combined,
         adjusted_std=ref.std,
         lead_time_factor=factor,
         confidence=confidence,
