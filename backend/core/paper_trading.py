@@ -7,6 +7,8 @@ from typing import List, Optional
 from backend.config import settings
 from backend.models.paper_trade import PaperSessionLocal, PaperTrade, ModelCityAccuracy, init_paper_db
 
+logger = logging.getLogger("weatherbot")
+
 # ── DB init guard ─────────────────────────────────────────────────────────────
 _db_initialized = False
 

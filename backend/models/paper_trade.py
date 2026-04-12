@@ -1,17 +1,12 @@
-"""Paper trading database — separate from main weatherbot.db."""
+"""Paper trading database — uses the same DATABASE_URL as the main DB."""
 from datetime import datetime
 
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 
-PAPER_DB_URL = "sqlite:///./paper_trades.db"
+# Re-use the main engine so paper trades survive on Postgres (Render, etc.)
+from backend.models.database import engine as paper_engine, SessionLocal as PaperSessionLocal
 
-paper_engine = create_engine(
-    PAPER_DB_URL,
-    connect_args={"check_same_thread": False},
-)
-PaperSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=paper_engine)
 PaperBase = declarative_base()
 
 
@@ -77,6 +72,7 @@ def init_paper_db():
 def _migrate():
     """Add columns introduced after initial schema without dropping the DB."""
     from sqlalchemy import inspect, text
+    is_pg = paper_engine.dialect.name == "postgresql"
     inspector = inspect(paper_engine)
     try:
         cols = [c["name"] for c in inspector.get_columns("paper_trades")]
@@ -87,6 +83,13 @@ def _migrate():
             ]:
                 if col not in cols:
                     with conn.begin():
-                        conn.execute(text(f"ALTER TABLE paper_trades ADD COLUMN {col} {typedef}"))
+                        if is_pg:
+                            conn.execute(text(
+                                f"ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS {col} {typedef}"
+                            ))
+                        else:
+                            conn.execute(text(
+                                f"ALTER TABLE paper_trades ADD COLUMN {col} {typedef}"
+                            ))
     except Exception:
         pass

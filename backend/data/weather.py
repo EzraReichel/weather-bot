@@ -346,9 +346,16 @@ async def fetch_nws_observed_temperature(city_key: str, target_date: Optional[da
             url = f"https://api.weather.gov/stations/{station}/observations"
             headers = {"User-Agent": "(trading-bot, contact@example.com)"}
 
-            # Get observations for the target date
-            start = datetime.combine(target_date, datetime.min.time()).isoformat() + "Z"
-            end = datetime.combine(target_date + timedelta(days=1), datetime.min.time()).isoformat() + "Z"
+            # Get observations for the full local calendar day.
+            # NWS stations report in local time; Kalshi settles on local calendar day.
+            # Use ET (UTC-5/UTC-4) local midnight → next midnight expressed in UTC.
+            from zoneinfo import ZoneInfo
+            et = ZoneInfo("America/New_York")
+            local_start = datetime(target_date.year, target_date.month, target_date.day,
+                                   0, 0, 0, tzinfo=et)
+            local_end   = local_start + timedelta(days=1)
+            start = local_start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            end   = local_end.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
             response = await client.get(url, params={"start": start, "end": end}, headers=headers)
             response.raise_for_status()
