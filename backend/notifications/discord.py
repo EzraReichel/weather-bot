@@ -210,8 +210,9 @@ def send_daily_summary(
         resolved_lines = []
         for t in paper_resolved_today:
             icon = "✅" if t.result == "win" else "❌"
+            kalshi_result = "YES" if (t.actual_temp or 0) >= 1.0 else "NO"
             resolved_lines.append(
-                f"{icon} `{t.ticker}` — {t.actual_temp:.1f}°F vs {t.threshold_f:.0f}°F  ${t.pnl:+.2f}"
+                f"{icon} `{t.ticker}` Kalshi={kalshi_result}  side={t.side.upper()}  ${t.pnl:+.2f}"
             )
         resolved_text = "\n".join(resolved_lines)
     else:
@@ -283,10 +284,13 @@ def send_paper_trade_alert(signal, trade) -> bool:
     if outlier:
         source_breakdown += f"\n*{outlier.upper()} dampened (outlier)*"
 
+    # Always show edge as positive from the side we're betting
+    display_edge = abs(signal.edge)
+
     fields = [
         {"name": "Ticker",        "value": f"`{market.market_id}`",              "inline": True},
         {"name": "Side",          "value": f"**{side}**",                         "inline": True},
-        {"name": "Edge",          "value": f"**{signal.edge:+.1%}**",             "inline": True},
+        {"name": "Edge",          "value": f"**+{display_edge:.1%}**",            "inline": True},
         {"name": "Combined Prob", "value": f"{signal.model_probability:.1%}",     "inline": True},
         {"name": "Market Price",  "value": f"{signal.market_probability:.1%}",    "inline": True},
         {"name": "Kelly Size",    "value": f"${signal.suggested_size:.0f}",       "inline": True},
@@ -373,8 +377,9 @@ def send_paper_report() -> bool:
         resolved_lines = []
         for t in resolved_trades[:8]:
             icon = "✅" if t.result == "win" else "❌"
+            kalshi_result = "YES" if (t.actual_temp or 0) >= 1.0 else "NO"
             resolved_lines.append(
-                f"{icon} `{t.ticker}` {t.actual_temp:.1f}°F vs {t.threshold_f:.0f}°F  ${t.pnl:+.2f}"
+                f"{icon} `{t.ticker}` Kalshi={kalshi_result}  side={t.side.upper()}  ${t.pnl:+.2f}"
             )
         if len(resolved_trades) > 8:
             resolved_lines.append(f"…+{len(resolved_trades)-8} more")

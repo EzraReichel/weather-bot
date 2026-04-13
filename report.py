@@ -16,7 +16,8 @@ def fmt_result(t: PaperTrade) -> str:
     if not t.resolved:
         return "PENDING"
     icon = "✅" if t.result == "win" else "❌"
-    return f"{icon} {t.result.upper()}  (actual {t.actual_temp:.1f}°F)"
+    kalshi = "YES" if (t.actual_temp or 0) >= 1.0 else "NO"
+    return f"{icon} {t.result.upper()}  (Kalshi={kalshi}  side={t.side.upper()})"
 
 def main():
     init_paper_db()
@@ -103,18 +104,14 @@ def main():
         print(f"  {'Ticker':<32} {'Model':>6} {'Outcome':>8} {'Sq Err':>8}")
         print(f"  {'──────':<32} {'─────':>6} {'───────':>8} {'──────':>8}")
         for t in sorted(resolved, key=lambda t: t.created_at):
-            if t.market_direction == "above":
-                yes_won = 1.0 if t.actual_temp > t.threshold_f else 0.0
-            else:
-                yes_won = 1.0 if t.actual_temp < t.threshold_f else 0.0
+            # actual_temp stores Kalshi result: 1.0=YES won, 0.0=NO won
+            yes_won = 1.0 if (t.actual_temp or 0) >= 1.0 else 0.0
             sq_err = (t.model_prob - yes_won) ** 2
             outcome_str = "YES won" if yes_won == 1.0 else "NO won"
             print(f"  {t.ticker:<32} {t.model_prob:>6.1%} {outcome_str:>8}  {sq_err:>7.4f}")
 
         brier = sum(
-            (t.model_prob - (1.0 if (t.market_direction == "above" and t.actual_temp > t.threshold_f)
-                             or (t.market_direction == "below" and t.actual_temp < t.threshold_f)
-                             else 0.0)) ** 2
+            (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
             for t in resolved
         ) / len(resolved)
         print(f"\n  Brier Score: {brier:.4f}")

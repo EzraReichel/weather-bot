@@ -84,19 +84,27 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
         db.close()
 
 
-# ── NWS temperature lookup ────────────────────────────────────────────────────
+# ── Kalshi settlement lookup ──────────────────────────────────────────────────
 
-async def _fetch_nws_daily_temp(city_key: str, target_date: date, metric: str) -> Optional[float]:
+async def _fetch_kalshi_result(ticker: str) -> Optional[str]:
     """
-    Fetch observed daily HIGH or LOW temperature (°F) from NWS.
-    Delegates to weather.py's fetch_nws_observed_temperature which uses the
-    exact station coordinates Kalshi uses for settlement.
+    Fetch the resolved result for a Kalshi market.
+    Returns "yes", "no", or None if not yet resolved.
     """
-    from backend.data.weather import fetch_nws_observed_temperature
-    obs = await fetch_nws_observed_temperature(city_key, target_date)
-    if obs is None:
+    from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
+    if not kalshi_credentials_present():
         return None
-    return obs.get(metric)
+    try:
+        client = KalshiClient()
+        data = await client.get_market(ticker)
+        market = data.get("market", data)  # API wraps in {"market": {...}}
+        result = market.get("result")      # "yes", "no", or None/""
+        if result in ("yes", "no"):
+            return result
+        return None
+    except Exception as e:
+        logger.debug(f"Kalshi settlement lookup failed for {ticker}: {e}")
+        return None
 
 
 # ── Settlement ────────────────────────────────────────────────────────────────
@@ -104,7 +112,7 @@ async def _fetch_nws_daily_temp(city_key: str, target_date: date, metric: str) -
 async def settle_paper_trades() -> List[PaperTrade]:
     """
     Find unresolved paper trades whose resolution_date has passed,
-    fetch the actual NWS temperature, and mark WIN/LOSS.
+    check Kalshi for the official result, and mark WIN/LOSS.
     Returns list of newly settled trades.
     """
     _ensure_db()
@@ -125,25 +133,18 @@ async def settle_paper_trades() -> List[PaperTrade]:
         logger.info(f"Settling {len(pending)} paper trade(s)...")
 
         for pt in pending:
-            target_date = date.fromisoformat(pt.resolution_date)
-            actual_temp = await _fetch_nws_daily_temp(pt.city, target_date, pt.metric)
+            # Primary: Kalshi official result
+            kalshi_result = await _fetch_kalshi_result(pt.ticker)
 
-            if actual_temp is None:
-                logger.info(f"Skipping settlement for {pt.ticker} — NWS data not available yet")
+            if kalshi_result is None:
+                logger.info(f"Skipping settlement for {pt.ticker} — Kalshi result not posted yet")
                 continue
 
-            # Determine if the YES condition resolved true
-            # market_direction is "above" or "below" (the YES condition)
-            if pt.market_direction == "above":
-                yes_wins = actual_temp > pt.threshold_f
-            else:
-                yes_wins = actual_temp < pt.threshold_f
+            # Did YES win according to Kalshi?
+            yes_wins = (kalshi_result == "yes")
 
             # We bet "yes" or "no" — did we win?
-            if pt.side == "yes":
-                we_win = yes_wins
-            else:
-                we_win = not yes_wins
+            we_win = yes_wins if pt.side == "yes" else not yes_wins
 
             if we_win:
                 pnl = (1.0 - pt.entry_price) * pt.contracts * (1.0 - settings.KALSHI_FEE_RATE)
@@ -152,18 +153,17 @@ async def settle_paper_trades() -> List[PaperTrade]:
                 pnl = pt.entry_price * pt.contracts * -1.0
                 result = "loss"
 
-            pt.actual_temp   = actual_temp
-            pt.resolved      = True
-            pt.result        = result
-            pt.pnl           = round(pnl, 2)
-            pt.resolved_at   = datetime.utcnow()
+            pt.resolved    = True
+            pt.result      = result
+            pt.pnl         = round(pnl, 2)
+            pt.resolved_at = datetime.utcnow()
+            # Store Kalshi result as actual_temp proxy so reports still work
+            # (actual_temp field repurposed: positive = yes resolved, negative = no resolved)
+            pt.actual_temp = 1.0 if yes_wins else 0.0
             settled.append(pt)
 
-            # YES resolved = 1.0 if YES condition was true, else 0.0
-            if pt.market_direction == "above":
-                yes_outcome = 1.0 if actual_temp > pt.threshold_f else 0.0
-            else:
-                yes_outcome = 1.0 if actual_temp < pt.threshold_f else 0.0
+            # YES outcome for Brier scoring
+            yes_outcome = 1.0 if yes_wins else 0.0
 
             # Update per-model city accuracy
             try:
@@ -193,7 +193,7 @@ async def settle_paper_trades() -> List[PaperTrade]:
             icon = "✅" if result == "win" else "❌"
             logger.info(
                 f"{icon} PAPER SETTLED: {pt.ticker}  {result.upper()}  "
-                f"actual={actual_temp:.1f}°F  threshold={pt.threshold_f:.0f}°F  "
+                f"Kalshi={kalshi_result.upper()}  side={pt.side.upper()}  "
                 f"P&L=${pnl:+.2f}"
             )
 
@@ -252,10 +252,8 @@ def get_paper_stats(db=None):
         # actual_outcome = 1 if YES won, 0 if NO won
         brier_scores = []
         for t in resolved:
-            if t.market_direction == "above":
-                yes_won = 1.0 if t.actual_temp > t.threshold_f else 0.0
-            else:
-                yes_won = 1.0 if t.actual_temp < t.threshold_f else 0.0
+            # actual_temp stores Kalshi result: 1.0=YES won, 0.0=NO won
+            yes_won = 1.0 if (t.actual_temp or 0) >= 1.0 else 0.0
             brier_scores.append((t.model_prob - yes_won) ** 2)
         brier = (sum(brier_scores) / len(brier_scores)) if brier_scores else None
 
