@@ -284,20 +284,38 @@ def send_paper_trade_alert(signal, trade) -> bool:
     if outlier:
         source_breakdown += f"\n*{outlier.upper()} dampened (outlier)*"
 
-    # Always show edge as positive from the side we're betting
-    display_edge = abs(signal.edge)
+    # Show all probabilities from the perspective of the side we're betting.
+    # model_probability and market_probability are always P(YES).
+    # For NO bets, flip them so the numbers match the side label.
+    betting_no = signal.direction == "no"
+    display_edge     = abs(signal.edge)
+    display_model    = (1.0 - signal.model_probability)    if betting_no else signal.model_probability
+    display_market   = (1.0 - signal.market_probability)   if betting_no else signal.market_probability
+    prob_label       = f"Our Model P({side})"
+    market_label     = f"Market P({side})"
+
+    # Per-source breakdown: also flip to NO side
+    source_parts = []
+    for n in ["gfs", "ecmwf", "gem", "nws"]:
+        if n in sp:
+            p = (1.0 - sp[n]) if betting_no else sp[n]
+            tag = " ⚡" if n == outlier else ""
+            source_parts.append(f"{n.upper()}: {p:.0%}{tag}")
+    source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
+    if outlier:
+        source_breakdown += f"\n*{outlier.upper()} dampened (outlier)*"
 
     fields = [
-        {"name": "Ticker",        "value": f"`{market.market_id}`",              "inline": True},
-        {"name": "Side",          "value": f"**{side}**",                         "inline": True},
-        {"name": "Edge",          "value": f"**+{display_edge:.1%}**",            "inline": True},
-        {"name": "Combined Prob", "value": f"{signal.model_probability:.1%}",     "inline": True},
-        {"name": "Market Price",  "value": f"{signal.market_probability:.1%}",    "inline": True},
-        {"name": "Kelly Size",    "value": f"${signal.suggested_size:.0f}",       "inline": True},
-        {"name": "Contracts",     "value": str(trade.contracts),                  "inline": True},
-        {"name": "Entry Price",   "value": f"{trade.entry_price:.2%}",            "inline": True},
-        {"name": "Agreement",     "value": f"{agreement_icon} {agreement}" + low_conf_note, "inline": True},
-        {"name": "Model Breakdown", "value": source_breakdown,                    "inline": False},
+        {"name": "Ticker",       "value": f"`{market.market_id}`",          "inline": True},
+        {"name": "Side",         "value": f"**{side}**",                     "inline": True},
+        {"name": "Edge",         "value": f"**+{display_edge:.1%}**",        "inline": True},
+        {"name": prob_label,     "value": f"{display_model:.1%}",            "inline": True},
+        {"name": market_label,   "value": f"{display_market:.1%}",           "inline": True},
+        {"name": "Kelly Size",   "value": f"${signal.suggested_size:.0f}",   "inline": True},
+        {"name": "Contracts",    "value": str(trade.contracts),               "inline": True},
+        {"name": "Entry Price",  "value": f"{trade.entry_price:.2%}",        "inline": True},
+        {"name": "Agreement",    "value": f"{agreement_icon} {agreement}" + low_conf_note, "inline": True},
+        {"name": "Model Breakdown", "value": source_breakdown,               "inline": False},
         {
             "name": "Forecast",
             "value": (
