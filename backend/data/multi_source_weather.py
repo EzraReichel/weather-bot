@@ -228,6 +228,84 @@ async def fetch_rain_probability(city_key: str, target_date: date) -> Optional[f
         return None
 
 
+# ── Real-time NWS observation fetcher ────────────────────────────────────────
+
+async def fetch_current_observation(city_key: str) -> Optional[dict]:
+    """
+    Fetch the current observed temperature and observed max-so-far today
+    from the NWS observations API for the city's NOAA station.
+
+    Returns dict with keys:
+        current_temp_f  : most recent observed temperature (°F)
+        observed_max_f  : highest temperature observed in the last 24h (°F)
+        observed_min_f  : lowest temperature observed in the last 24h (°F)
+        obs_time        : ISO timestamp of the most recent observation
+    or None on failure.
+    """
+    city = CITY_CONFIG.get(city_key)
+    if not city:
+        return None
+
+    station = city.get("noaa_station") or city.get("nws_station")
+    if not station:
+        return None
+
+    headers = {"User-Agent": "KalshiWeatherArb/1.0 (weather-arb-bot)"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Latest single observation
+            latest_url = f"https://api.weather.gov/stations/{station}/observations/latest"
+            resp = await client.get(latest_url, headers=headers)
+            resp.raise_for_status()
+            latest_data = resp.json()
+
+            props = latest_data.get("properties", {})
+            temp_c = props.get("temperature", {}).get("value")
+            if temp_c is None:
+                return None
+            current_temp_f = _celsius_to_fahrenheit(temp_c)
+            obs_time = props.get("timestamp", "")
+
+            # Recent 24h observations to find today's max/min
+            obs_url = f"https://api.weather.gov/stations/{station}/observations"
+            from datetime import timezone
+            now_utc = datetime.utcnow().replace(tzinfo=timezone.utc)
+            start_utc = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            resp24 = await client.get(
+                obs_url,
+                params={"start": start_utc, "limit": 200},
+                headers=headers,
+            )
+            resp24.raise_for_status()
+            obs_data = resp24.json()
+
+            temps_f = []
+            for feature in obs_data.get("features", []):
+                tc = feature.get("properties", {}).get("temperature", {}).get("value")
+                if tc is not None:
+                    temps_f.append(_celsius_to_fahrenheit(tc))
+
+            if not temps_f:
+                temps_f = [current_temp_f]
+
+            result = {
+                "current_temp_f": round(current_temp_f, 1),
+                "observed_max_f": round(max(temps_f), 1),
+                "observed_min_f": round(min(temps_f), 1),
+                "obs_time": obs_time,
+            }
+            logger.debug(
+                f"NWS obs {city_key} ({station}): current={current_temp_f:.1f}F "
+                f"max24h={result['observed_max_f']:.1f}F min24h={result['observed_min_f']:.1f}F"
+            )
+            return result
+
+    except Exception as e:
+        logger.debug(f"fetch_current_observation failed for {city_key}: {e}")
+        return None
+
+
 # ── Public API: fetch all sources in parallel ─────────────────────────────────
 
 async def fetch_all_sources(

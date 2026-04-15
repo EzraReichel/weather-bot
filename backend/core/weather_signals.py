@@ -165,6 +165,85 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
             + (f" outlier_dampened={multi_result.outlier_dampened}" if multi_result.outlier_dampened else "")
         )
 
+    # ── Real-time observation constraint (≤6 hours to expiry) ────────────────
+    # When the market resolves very soon, actual observations may already
+    # determine the outcome. Fetch current NWS observation and short-circuit
+    # if the result is already decided.
+    if market.metric in ("high", "low"):
+        try:
+            from backend.data.multi_source_weather import fetch_current_observation
+            from datetime import timezone as _tz
+            from zoneinfo import ZoneInfo as _ZI
+
+            # Hours until market resolves (end of target_date in ET)
+            _et = _ZI("America/New_York")
+            _resolution_et = datetime(
+                market.target_date.year, market.target_date.month, market.target_date.day,
+                23, 59, 0, tzinfo=_et,
+            )
+            _now_utc = datetime.now(_tz.utc)
+            _hours_left = (_resolution_et.astimezone(_tz.utc) - _now_utc).total_seconds() / 3600.0
+
+            if 0 < _hours_left <= 6:
+                obs = await fetch_current_observation(market.city_key)
+                if obs:
+                    obs_max = obs["observed_max_f"]
+                    obs_min = obs["observed_min_f"]
+                    obs_cur = obs["current_temp_f"]
+                    logger.info(
+                        f"OBS {market.city_key} ({market.target_date}): "
+                        f"current={obs_cur:.1f}F max={obs_max:.1f}F min={obs_min:.1f}F "
+                        f"hours_left={_hours_left:.1f}h"
+                    )
+
+                    if market.metric == "high":
+                        if market.direction == "below" and obs_max >= market.threshold_f:
+                            # Temp already exceeded threshold — YES (below X) has already lost
+                            logger.info(
+                                f"SKIP {market.market_id}: observed_max={obs_max:.1f}F >= "
+                                f"threshold={market.threshold_f:.0f}F — market already resolved NO"
+                            )
+                            _sig = WeatherTradingSignal(
+                                market=market, model_probability=model_yes_prob,
+                                market_probability=market.yes_price, edge=0.0,
+                                direction="yes", confidence=confidence,
+                                kelly_fraction=0.0, suggested_size=0.0,
+                                reasoning=f"[FILTERED:obs_resolved] observed_max={obs_max:.1f}F >= threshold={market.threshold_f:.0f}F",
+                                ensemble_mean=ensemble_mean, ensemble_std=ensemble_std,
+                                ensemble_members=ensemble_members,
+                                low_confidence_flag=low_conf,
+                                source_probs=source_probs_map, agreement=agreement,
+                                sources_used=sources_used,
+                                outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+                                filter_reason="obs_resolved",
+                            )
+                            return _sig
+
+                        if market.direction == "above" and obs_max >= market.threshold_f:
+                            # Already above threshold — YES (above X) has already won; market ≈ 99¢
+                            logger.info(
+                                f"SKIP {market.market_id}: observed_max={obs_max:.1f}F >= "
+                                f"threshold={market.threshold_f:.0f}F — YES already guaranteed, skip"
+                            )
+                            _sig = WeatherTradingSignal(
+                                market=market, model_probability=model_yes_prob,
+                                market_probability=market.yes_price, edge=0.0,
+                                direction="yes", confidence=confidence,
+                                kelly_fraction=0.0, suggested_size=0.0,
+                                reasoning=f"[FILTERED:obs_guaranteed] observed_max={obs_max:.1f}F >= threshold={market.threshold_f:.0f}F",
+                                ensemble_mean=ensemble_mean, ensemble_std=ensemble_std,
+                                ensemble_members=ensemble_members,
+                                low_confidence_flag=low_conf,
+                                source_probs=source_probs_map, agreement=agreement,
+                                sources_used=sources_used,
+                                outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+                                filter_reason="obs_guaranteed",
+                            )
+                            return _sig
+
+        except Exception as _obs_err:
+            logger.debug(f"Observation constraint check failed for {market.market_id}: {_obs_err}")
+
     # ── Climatology prior filter ──────────────────────────────────────────────
     # If the ensemble mean is within 1.5°F of the 30-year monthly normal,
     # the model has no real edge — the market already prices in climatology.
