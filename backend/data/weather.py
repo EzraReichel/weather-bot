@@ -14,43 +14,49 @@ CITY_CONFIG: Dict[str, dict] = {
     # Coordinates match the exact NOAA/NWS station Kalshi uses for settlement.
     # Using airport station coords (not city center) is critical — e.g. downtown LA
     # runs 5-8°F hotter than LAX, which would produce massive phantom edges.
+    # noaa_station = the ICAO station ID Kalshi uses for official resolution.
     "nyc": {
         "name": "New York City",
-        "lat": 40.7128,   # KNYC — Central Park
-        "lon": -74.0060,
+        "lat": 40.7789,   # KNYC — Central Park (Kalshi resolution station)
+        "lon": -73.9692,
         "nws_station": "KNYC",
+        "noaa_station": "KNYC",
         "nws_office": "OKX",
         "nws_gridpoint": "OKX/33,37",
     },
     "chicago": {
         "name": "Chicago",
-        "lat": 41.9742,   # KORD — O'Hare
+        "lat": 41.9742,   # KORD — O'Hare (Kalshi resolution station)
         "lon": -87.9073,
         "nws_station": "KORD",
+        "noaa_station": "KORD",
         "nws_office": "LOT",
         "nws_gridpoint": "LOT/75,72",
     },
     "miami": {
         "name": "Miami",
-        "lat": 25.7959,   # KMIA — Miami Intl
+        "lat": 25.7959,   # KMIA — Miami Intl (Kalshi resolution station)
         "lon": -80.2870,
         "nws_station": "KMIA",
+        "noaa_station": "KMIA",
         "nws_office": "MFL",
         "nws_gridpoint": "MFL/75,53",
     },
     "los_angeles": {
         "name": "Los Angeles",
-        "lat": 33.9425,   # KLAX — LAX airport
+        "lat": 33.9425,   # KLAX — LAX airport (Kalshi resolution station)
         "lon": -118.4081,
         "nws_station": "KLAX",
+        "noaa_station": "KLAX",
         "nws_office": "LOX",
         "nws_gridpoint": "LOX/154,44",
     },
     "denver": {
         "name": "Denver",
-        "lat": 39.8561,   # KDEN — Denver Intl
+        "lat": 39.8561,   # KDEN — Denver Intl (Kalshi resolution station)
         "lon": -104.6737,
         "nws_station": "KDEN",
+        "noaa_station": "KDEN",
         "nws_office": "BOU",
         "nws_gridpoint": "BOU/62,60",
     },
