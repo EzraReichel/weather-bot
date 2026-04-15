@@ -387,13 +387,28 @@ async def fetch_kalshi_weather_markets(
                     else:
                         no_price = 1.0 - yes_price
 
-                    # Near-certain markets — skip silently
-                    if yes_price > 0.97 or yes_price < 0.03:
+                    # Near-certain markets — model can't beat these, skip
+                    if yes_price > 0.95 or yes_price < 0.05:
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="near_certain", yes_price=yes_price))
                         continue
 
                     # ── Liquidity filters ─────────────────────────────────────
                     yes_ask_size = float(m.get("yes_ask_size_fp") or 0)
                     volume_24h   = float(m.get("volume_24h_fp") or 0)
+
+                    # Stale/illiquid market: price at 50¢ (±1¢) with zero or near-zero volume
+                    # These markets haven't had real price discovery — skip to avoid fake edge
+                    if 0.49 <= yes_price <= 0.51 and volume_24h < 50:
+                        logger.info(
+                            f"STALE SKIP {ticker}: price={yes_price:.2f} (at 50¢) "
+                            f"volume_24h={volume_24h:.0f} — likely no price discovery")
+                        report.filtered.append(FilteredMarket(
+                            ticker=ticker, city=city_key, title=title,
+                            reason="stale_50cent", ask_size=yes_ask_size,
+                            volume_24h=volume_24h, yes_price=yes_price))
+                        continue
 
                     if yes_ask_size < MIN_ASK_SIZE:
                         logger.info(
