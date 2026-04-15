@@ -183,6 +183,64 @@ CITY_CONFIG: Dict[str, dict] = {
 }
 
 
+# ── 30-year NOAA Climate Normals 1991-2020 (monthly high/low °F) ─────────────
+# Source: NOAA Climate Normals for each city's Kalshi resolution station.
+# Format: {city_key: [(high, low), ...]} indexed by month (0=Jan, 11=Dec).
+CLIMATOLOGY_NORMALS: Dict[str, list] = {
+    # KNYC (Central Park)
+    "nyc": [
+        (39, 27), (42, 29), (51, 36), (62, 45), (72, 54), (80, 63),
+        (85, 68), (83, 67), (76, 60), (64, 49), (54, 39), (43, 31),
+    ],
+    # KORD (O'Hare)
+    "chicago": [
+        (32, 17), (37, 22), (48, 31), (60, 41), (71, 51), (81, 61),
+        (85, 66), (83, 65), (75, 57), (63, 45), (49, 34), (36, 21),
+    ],
+    # KMIA (Miami Intl)
+    "miami": [
+        (77, 60), (79, 62), (82, 65), (85, 69), (89, 73), (91, 76),
+        (92, 77), (92, 77), (90, 76), (86, 72), (82, 67), (78, 62),
+    ],
+    # KLAX (LAX airport)
+    "los_angeles": [
+        (68, 48), (69, 50), (70, 52), (73, 55), (74, 59), (79, 63),
+        (83, 66), (85, 67), (84, 65), (79, 60), (73, 53), (68, 48),
+    ],
+    # KDEN (Denver Intl)
+    "denver": [
+        (47, 20), (50, 23), (57, 30), (63, 38), (72, 47), (82, 56),
+        (88, 63), (86, 61), (78, 51), (65, 39), (53, 28), (45, 21),
+    ],
+}
+
+
+def get_climatology_normal(city_key: str, target_date: "date", metric: str) -> Optional[float]:
+    """
+    Return the 30-year NOAA Climate Normal (1991-2020) for a city/month/metric.
+
+    Args:
+        city_key: city identifier (e.g. "nyc")
+        target_date: the date whose month is used
+        metric: "high" or "low"
+
+    Returns:
+        Monthly normal temperature in °F, or None if not available.
+    """
+    normals = CLIMATOLOGY_NORMALS.get(city_key)
+    if normals is None:
+        return None
+
+    month_idx = target_date.month - 1   # 0-indexed
+    high_normal, low_normal = normals[month_idx]
+
+    if metric == "high":
+        return float(high_normal)
+    elif metric == "low":
+        return float(low_normal)
+    return None
+
+
 @dataclass
 class EnsembleForecast:
     """Ensemble weather forecast with per-member data."""

@@ -13,7 +13,7 @@ from backend.core.probability import (
     MultiSourceResult,
     LOW_CONFIDENCE_EDGE_OVERRIDE,
 )
-from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG
+from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG, get_climatology_normal
 from backend.data.weather_markets import WeatherMarket
 from backend.models.database import SessionLocal, Signal
 
@@ -164,6 +164,40 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
             f"spread={multi_result.max_spread:.0%} agreement={agreement}"
             + (f" outlier_dampened={multi_result.outlier_dampened}" if multi_result.outlier_dampened else "")
         )
+
+    # ── Climatology prior filter ──────────────────────────────────────────────
+    # If the ensemble mean is within 1.5°F of the 30-year monthly normal,
+    # the model has no real edge — the market already prices in climatology.
+    climo_normal = get_climatology_normal(market.city_key, market.target_date, market.metric)
+    if climo_normal is not None and market.metric in ("high", "low"):
+        deviation = abs(ensemble_mean - climo_normal)
+        if deviation <= 1.5:
+            logger.info(
+                f"SKIP {market.market_id}: ensemble mean={ensemble_mean:.1f}F is within "
+                f"1.5F of climatology normal={climo_normal:.0f}F (deviation={deviation:.1f}F) "
+                f"— near_climatology filter"
+            )
+            signal = WeatherTradingSignal(
+                market=market,
+                model_probability=model_yes_prob,
+                market_probability=market.yes_price,
+                edge=0.0,
+                direction="yes",
+                confidence=confidence,
+                kelly_fraction=0.0,
+                suggested_size=0.0,
+                reasoning=f"[FILTERED:near_climatology] ensemble={ensemble_mean:.1f}F normal={climo_normal:.0f}F deviation={deviation:.1f}F",
+                ensemble_mean=ensemble_mean,
+                ensemble_std=ensemble_std,
+                ensemble_members=ensemble_members,
+                low_confidence_flag=low_conf,
+                source_probs=source_probs_map,
+                agreement=agreement,
+                sources_used=sources_used,
+                outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+                filter_reason="near_climatology",
+            )
+            return signal
 
     market_yes_prob = market.yes_price
 
