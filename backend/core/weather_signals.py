@@ -463,6 +463,8 @@ class ScanReport:
     # signal-level filtered (passed liquidity, but signal didn't make threshold)
     below_edge: List[WeatherTradingSignal] = field(default_factory=list)
     low_agreement_filtered: List[WeatherTradingSignal] = field(default_factory=list)
+    # Temperature regime detected across cities ("WARM", "COLD", or "NEUTRAL")
+    regime: str = "NEUTRAL"
 
     @property
     def actionable(self) -> List[WeatherTradingSignal]:
@@ -509,6 +511,15 @@ async def scan_for_weather_signals() -> ScanReport:
     # on the same observed temperature — betting all of them is not
     # diversification, it multiplies the same correlated risk.
     signals = _dedup_correlated(signals)
+
+    # ── Multi-city temperature regime detection ───────────────────────────────
+    # Check if 3+ cities show coordinated warm/cold deviation from climatology.
+    # If so, nudge aligned signals by +3% probability in the regime direction.
+    regime = _detect_temperature_regime(signals)
+    _apply_regime_nudge(signals, regime)
+
+    # Re-sort after nudge (edges may have shifted)
+    signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
     # ── Resize using live available bankroll ──────────────────────────────────
     # Kelly was computed with the static INITIAL_BANKROLL. Subtract capital
@@ -560,8 +571,101 @@ async def scan_for_weather_signals() -> ScanReport:
         fetch_report=fetch_report,
         below_edge=below_edge,
         low_agreement_filtered=low_agreement_filtered,
+        regime=regime,
     )
     return report
+
+
+def _detect_temperature_regime(signals: List[WeatherTradingSignal]) -> str:
+    """
+    Examine ensemble means vs climatology normals across all signals.
+    If 3+ cities deviate in the SAME direction by more than 4°F, declare
+    a WARM or COLD regime. Otherwise return "NEUTRAL".
+
+    A regime nudges model_yes_prob by +0.03 for signals aligned with
+    the regime direction (applied in scan_for_weather_signals after this call).
+    """
+    REGIME_THRESHOLD = 4.0       # °F deviation from normal
+    REGIME_MIN_CITIES = 3        # cities required to declare a regime
+
+    warm_deviations = []
+    cold_deviations = []
+
+    for s in signals:
+        if s.market.metric not in ("high", "low"):
+            continue
+        if s.ensemble_mean == 0.0:
+            continue
+        climo = get_climatology_normal(s.market.city_key, s.market.target_date, s.market.metric)
+        if climo is None:
+            continue
+        deviation = s.ensemble_mean - climo
+        if deviation > REGIME_THRESHOLD:
+            warm_deviations.append((s.market.city_key, deviation))
+        elif deviation < -REGIME_THRESHOLD:
+            cold_deviations.append((s.market.city_key, deviation))
+
+    # Deduplicate by city (a city may have multiple signals — count it once)
+    warm_cities = {city for city, _ in warm_deviations}
+    cold_cities = {city for city, _ in cold_deviations}
+
+    if len(warm_cities) >= REGIME_MIN_CITIES:
+        avg_dev = sum(d for _, d in warm_deviations) / len(warm_deviations)
+        logger.info(
+            f"WARM REGIME detected: {len(warm_cities)} cities showing "
+            f"{avg_dev:+.1f}F above normal  ({', '.join(sorted(warm_cities))})"
+        )
+        return "WARM"
+    elif len(cold_cities) >= REGIME_MIN_CITIES:
+        avg_dev = sum(d for _, d in cold_deviations) / len(cold_deviations)
+        logger.info(
+            f"COLD REGIME detected: {len(cold_cities)} cities showing "
+            f"{avg_dev:+.1f}F below normal  ({', '.join(sorted(cold_cities))})"
+        )
+        return "COLD"
+
+    return "NEUTRAL"
+
+
+def _apply_regime_nudge(signals: List[WeatherTradingSignal], regime: str) -> None:
+    """
+    Apply a +0.03 probability nudge to signals aligned with the active regime.
+    Modifies signals in-place.
+
+    COLD regime: nudge "high below X" signals (cold = more likely below threshold)
+    WARM regime: nudge "high above X" signals (warm = more likely above threshold)
+    """
+    if regime == "NEUTRAL":
+        return
+
+    NUDGE = 0.03
+    PROB_CAP = 0.95
+    nudged = 0
+
+    for s in signals:
+        if s.market.metric not in ("high", "low"):
+            continue
+        if s.filter_reason:
+            continue  # already filtered — don't nudge
+
+        aligned = (
+            (regime == "COLD" and s.market.direction == "below")
+            or (regime == "WARM" and s.market.direction == "above")
+        )
+        if aligned:
+            old_prob = s.model_probability
+            new_prob = min(PROB_CAP, old_prob + NUDGE)
+            s.model_probability = new_prob
+            # Recompute edge with the nudged probability
+            s.edge = new_prob - s.market_probability
+            nudged += 1
+            logger.debug(
+                f"Regime nudge ({regime}): {s.market.market_id} "
+                f"model_prob {old_prob:.3f} → {new_prob:.3f}  edge {s.edge:+.3f}"
+            )
+
+    if nudged:
+        logger.info(f"Regime {regime}: applied +{NUDGE:.0%} nudge to {nudged} aligned signal(s)")
 
 
 def _dedup_correlated(signals: List[WeatherTradingSignal]) -> List[WeatherTradingSignal]:
