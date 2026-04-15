@@ -428,6 +428,19 @@ async def fetch_kalshi_weather_markets(
                             volume_24h=volume_24h, yes_price=yes_price))
                         continue
 
+                    # ── Bid price extraction ──────────────────────────────
+                    # Kalshi's bulk /markets endpoint does NOT expose yes_bid
+                    # in the listing response — only yes_ask is available.
+                    # yes_bid stays 0 (unavailable) until the API exposes it.
+                    yes_bid_d = m.get("yes_bid_dollars")
+                    yes_bid_c = m.get("yes_bid")
+                    if yes_bid_d is not None:
+                        yes_bid = float(yes_bid_d)
+                    elif yes_bid_c is not None:
+                        yes_bid = yes_bid_c / 100.0
+                    else:
+                        yes_bid = 0.0   # unavailable in bulk listing
+
                     report.markets.append(WeatherMarket(
                         slug=ticker, market_id=ticker, platform="kalshi",
                         title=title, city_key=city_key, city_name=city_name,
@@ -436,6 +449,8 @@ async def fetch_kalshi_weather_markets(
                         metric=parsed["metric"], direction=parsed["direction"],
                         yes_price=yes_price, no_price=no_price,
                         volume=float(m.get("volume", 0) or 0),
+                        yes_ask=yes_price,   # yes_price is already the ask
+                        yes_bid=yes_bid,
                     ))
 
                 cursor = data.get("cursor")

@@ -278,7 +278,14 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
             )
             return signal
 
-    market_yes_prob = market.yes_price
+    # Use bid/ask midpoint as the market's implied probability when bid is
+    # available (more accurate). Fall back to yes_price (the ask) when bid
+    # is unavailable — which is the common case for Kalshi's bulk endpoint.
+    # Entry cost for Kelly sizing always uses the ask (yes_price / no_price).
+    if market.yes_bid > 0:
+        market_yes_prob = (market.yes_ask + market.yes_bid) / 2.0
+    else:
+        market_yes_prob = market.yes_price  # ask only — bid not exposed by API
 
     # Edge direction
     edge = model_yes_prob - market_yes_prob
