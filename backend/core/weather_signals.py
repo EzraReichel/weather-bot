@@ -154,6 +154,7 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
             direction=market.direction,
             target_date=market.target_date,
             metric=market.metric,
+            city_key=market.city_key,
         )
     except Exception as e:
         logger.warning(f"Multi-source fetch failed for {market.market_id}, falling back to GFS: {e}")

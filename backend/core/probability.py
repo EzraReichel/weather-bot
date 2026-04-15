@@ -191,12 +191,91 @@ class MultiSourceResult:
     confidence: float    = 0.7
 
 
+# ── Dynamic source weights from per-city Brier scores ────────────────────────
+# Cache: (city_key, metric) -> (timestamp, weights_dict)
+_dynamic_weight_cache: Dict[str, tuple] = {}
+_WEIGHT_CACHE_TTL = 3600.0   # refresh every 1 hour
+
+
+def get_dynamic_source_weights(city_key: str, metric: str) -> Dict[str, float]:
+    """
+    Query ModelCityAccuracy for per-model Brier scores and compute
+    inverse-Brier weights. Falls back to static SOURCE_WEIGHTS when
+    insufficient data (n < 10 for any source).
+
+    Weights are cached per (city_key, metric) for 1 hour to avoid
+    repeated DB queries on every signal generation call.
+    """
+    import time as _time
+    cache_key = f"{city_key}:{metric}"
+    now = _time.time()
+
+    if cache_key in _dynamic_weight_cache:
+        cached_at, cached_weights = _dynamic_weight_cache[cache_key]
+        if now - cached_at < _WEIGHT_CACHE_TTL:
+            return cached_weights
+
+    try:
+        from backend.models.paper_trade import PaperSessionLocal, ModelCityAccuracy
+        db = PaperSessionLocal()
+        try:
+            rows = (
+                db.query(ModelCityAccuracy)
+                .filter(
+                    ModelCityAccuracy.city  == city_key,
+                    ModelCityAccuracy.metric == metric,
+                    ModelCityAccuracy.n     >= 10,
+                )
+                .all()
+            )
+        finally:
+            db.close()
+
+        if not rows:
+            logger.debug(
+                f"Dynamic weights: insufficient data for {city_key}/{metric} — using static weights"
+            )
+            _dynamic_weight_cache[cache_key] = (now, SOURCE_WEIGHTS)
+            return SOURCE_WEIGHTS
+
+        # Inverse-Brier weight: lower Brier score = higher weight
+        raw: Dict[str, float] = {}
+        for row in rows:
+            if row.n > 0 and row.brier_sum >= 0:
+                brier = row.brier_sum / row.n
+                raw[row.model] = 1.0 / max(brier, 1e-6)   # avoid div/0
+            else:
+                raw[row.model] = SOURCE_WEIGHTS.get(row.model, 0.20)
+
+        # Only use models present in static weights; fall back for missing ones
+        weights: Dict[str, float] = {}
+        for model in SOURCE_WEIGHTS:
+            weights[model] = raw.get(model, SOURCE_WEIGHTS[model])
+
+        total = sum(weights.values())
+        if total <= 0:
+            return SOURCE_WEIGHTS
+        normalized = {k: v / total for k, v in weights.items()}
+
+        logger.debug(
+            f"Dynamic weights {city_key}/{metric}: "
+            + "  ".join(f"{k}={v:.3f}" for k, v in normalized.items())
+        )
+        _dynamic_weight_cache[cache_key] = (now, normalized)
+        return normalized
+
+    except Exception as e:
+        logger.debug(f"Dynamic weight lookup failed for {city_key}/{metric}: {e}")
+        return SOURCE_WEIGHTS
+
+
 def compute_multi_source_probability(
     sources: Dict,            # Dict[str, SourceForecast] from multi_source_weather
     threshold_f: float,
     direction: str,           # "above" or "below"
     target_date: date,
     metric: str = "high",     # "high" or "low" — selects std floor
+    city_key: str = "",       # used for dynamic weight lookup (optional)
 ) -> Optional[MultiSourceResult]:
     """
     Compute ensemble-of-ensembles probability from multiple weather sources.
@@ -264,7 +343,10 @@ def compute_multi_source_probability(
     # If one source is >OUTLIER_THRESHOLD away from the median of the other 3,
     # cut its weight by OUTLIER_DAMPEN and redistribute to the agreeing models.
     outlier_dampened: Optional[str] = None
-    raw_weights = {k: SOURCE_WEIGHTS.get(k, 1.0 / len(names)) for k in names}
+    # Use dynamic per-city Brier weights when sufficient data exists,
+    # otherwise fall back to the static SOURCE_WEIGHTS.
+    _base_weights = get_dynamic_source_weights(city_key, metric) if city_key else SOURCE_WEIGHTS
+    raw_weights = {k: _base_weights.get(k, 1.0 / len(names)) for k in names}
 
     if len(names) >= 3:
         import statistics as _stat
