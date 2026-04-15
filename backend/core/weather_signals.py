@@ -84,6 +84,54 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
 
         raw_sources = await fetch_all_sources(market.city_key, market.target_date)
 
+        # ── GFS vs ECMWF divergence filter ───────────────────────────────
+        # If the two primary models disagree by more than 8°F on the ensemble
+        # mean, there is a major pattern conflict — skip to avoid whipsaw.
+        _MODEL_DIVERGENCE_THRESHOLD = 8.0
+        _gfs_src  = raw_sources.get("gfs")
+        _ecmwf_src = raw_sources.get("ecmwf")
+        if (
+            _gfs_src and _gfs_src.ok and _gfs_src.member_highs
+            and _ecmwf_src and _ecmwf_src.ok and _ecmwf_src.member_highs
+        ):
+            import statistics as _st
+            _gfs_members  = _gfs_src.member_highs  if market.metric == "high" else _gfs_src.member_lows
+            _ecmwf_members = _ecmwf_src.member_highs if market.metric == "high" else _ecmwf_src.member_lows
+            if _gfs_members and _ecmwf_members:
+                _gfs_mean   = _st.mean(_gfs_members)
+                _ecmwf_mean = _st.mean(_ecmwf_members)
+                _divergence = abs(_gfs_mean - _ecmwf_mean)
+                if _divergence > _MODEL_DIVERGENCE_THRESHOLD:
+                    logger.info(
+                        f"SKIP {market.market_id}: GFS mean={_gfs_mean:.1f}F vs "
+                        f"ECMWF mean={_ecmwf_mean:.1f}F — divergence {_divergence:.1f}F "
+                        f"exceeds {_MODEL_DIVERGENCE_THRESHOLD:.0f}F threshold (model_divergence)"
+                    )
+                    # Return a filtered signal (edge=0) rather than None so it
+                    # shows up in the scan report for visibility.
+                    return WeatherTradingSignal(
+                        market=market,
+                        model_probability=0.5,
+                        market_probability=market.yes_price,
+                        edge=0.0,
+                        direction="yes",
+                        confidence=0.3,
+                        kelly_fraction=0.0,
+                        suggested_size=0.0,
+                        reasoning=(
+                            f"[FILTERED:model_divergence] GFS={_gfs_mean:.1f}F "
+                            f"ECMWF={_ecmwf_mean:.1f}F diff={_divergence:.1f}F"
+                        ),
+                        ensemble_mean=(_gfs_mean + _ecmwf_mean) / 2,
+                        ensemble_std=0.0,
+                        ensemble_members=len(_gfs_members),
+                        low_confidence_flag=True,
+                        source_probs={},
+                        agreement="LOW",
+                        sources_used=["gfs", "ecmwf"],
+                        filter_reason="model_divergence",
+                    )
+
         # Re-map member list to correct metric (highs vs lows)
         from backend.data.multi_source_weather import SourceForecast
         metric_sources: Dict[str, SourceForecast] = {}
