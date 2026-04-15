@@ -45,6 +45,22 @@ async def weather_scan_job():
         # Store latest scan report for daily summary
         _latest_scan_report = scan
 
+        # ── Trading hours gate ────────────────────────────────────────────
+        # Scan always runs (for data collection), but paper trading and
+        # Discord alerts are suppressed outside 10am–6pm ET.
+        from zoneinfo import ZoneInfo as _ZI
+        _et_now = datetime.now(_ZI("America/New_York"))
+        _in_trading_hours = (
+            settings.TRADING_HOURS_START <= _et_now.hour < settings.TRADING_HOURS_END
+        )
+        if not _in_trading_hours:
+            logger.info(
+                f"Outside trading hours ({settings.TRADING_HOURS_START}am–"
+                f"{settings.TRADING_HOURS_END}pm ET, current={_et_now.strftime('%H:%M %Z')}) "
+                f"— scan complete, skipping paper trade entries and Discord alerts"
+            )
+            return
+
         # Paper trade ALL signals >= 8% edge; send Discord alert for every NEW paper trade
         from backend.core.paper_trading import log_paper_trade
         from backend.notifications.discord import send_paper_trade_alert

@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     WEATHER_MAX_TRADE_SIZE: float = 100.0
     WEATHER_CITIES: str = "nyc,chicago,miami,los_angeles,denver"
 
+    # Trading hours gate (US/Eastern) — paper trades and Discord alerts only
+    # fire inside this window. Scanning still runs outside hours for data.
+    TRADING_HOURS_START: int = 10   # 10:00 AM ET (inclusive)
+    TRADING_HOURS_END: int = 18     # 6:00 PM ET (exclusive)
+
     # Dry run — default TRUE so live trading requires explicit opt-in
     DRY_RUN: bool = True
 
