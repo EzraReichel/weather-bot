@@ -1,5 +1,14 @@
 """
 Gaussian CDF probability engine — single and multi-source ensemble-of-ensembles.
+
+Probability blending policy (Task 3 fix):
+  - Ensemble fraction is the PRIMARY signal (fraction of members on YES side).
+  - Gaussian CDF provides a smoothing correction only (30% weight).
+  - A minimum std floor prevents over-confidence when the ensemble is tight:
+      daily high: std >= STD_FLOOR_HIGH (3°F)
+      daily low:  std >= STD_FLOOR_LOW  (2°F)
+    (floor is applied BEFORE the CDF, not to the ensemble fraction itself)
+  - Final blend: 70% ensemble_fraction + 30% gaussian_cdf, clamped [0.05, 0.95].
 """
 import logging
 from dataclasses import dataclass, field
@@ -19,6 +28,14 @@ LEAD_TIME_FACTORS = [
     (48, 72, 1.5),   # 48-72 hours
     (72, float("inf"), 1.8),  # 72+ hours
 ]
+
+# Minimum std floors to prevent over-confidence when ensemble is tight (°F)
+STD_FLOOR_HIGH = 3.0   # daily high markets
+STD_FLOOR_LOW  = 2.0   # daily low markets
+
+# Blend weights: ensemble fraction vs Gaussian CDF
+ENSEMBLE_FRACTION_WEIGHT = 0.70
+GAUSSIAN_CDF_WEIGHT      = 0.30
 
 
 def _lead_time_factor(target_date: date) -> float:
@@ -52,15 +69,22 @@ def compute_probability(
     threshold_f: float,
     direction: str,           # "above" or "below"
     target_date: date,
+    metric: str = "high",     # "high" or "low" — used to pick the right std floor
 ) -> Optional[ProbabilityResult]:
     """
     Compute calibrated probability that temperature is above/below threshold.
+
+    Uses ensemble fraction as the primary signal (70%) with Gaussian CDF as a
+    smoothing correction (30%).  A minimum std floor (3°F for highs, 2°F for lows)
+    is applied before the CDF to prevent extreme probabilities when the ensemble
+    is artificially tight.
 
     Args:
         member_values: List of ensemble member temperature values (Fahrenheit)
         threshold_f: Temperature threshold to compare against
         direction: "above" (P(temp > threshold)) or "below" (P(temp < threshold))
         target_date: The date the market resolves
+        metric: "high" or "low" — selects STD_FLOOR_HIGH vs STD_FLOOR_LOW
 
     Returns:
         ProbabilityResult or None if insufficient data
@@ -78,16 +102,24 @@ def compute_probability(
     factor = _lead_time_factor(target_date)
     adj_std = std * factor
 
-    # Gaussian CDF probability
+    # Apply std floor BEFORE the CDF to prevent over-extrapolation.
+    # The floor is NOT applied to the ensemble fraction (that stays raw).
+    std_floor = STD_FLOOR_HIGH if metric != "low" else STD_FLOOR_LOW
+    cdf_std = max(adj_std, std_floor)
+
+    # Raw ensemble fraction — PRIMARY signal
     if direction == "above":
-        # P(temp > threshold) = 1 - CDF(threshold, mean, adj_std)
-        model_prob = float(1.0 - norm.cdf(threshold_f, loc=mean, scale=adj_std))
-        # Raw ensemble fraction
         ensemble_fraction = sum(1 for v in member_values if v > threshold_f) / len(member_values)
+        gaussian_cdf = float(1.0 - norm.cdf(threshold_f, loc=mean, scale=cdf_std))
     else:
-        # P(temp < threshold) = CDF(threshold, mean, adj_std)
-        model_prob = float(norm.cdf(threshold_f, loc=mean, scale=adj_std))
         ensemble_fraction = sum(1 for v in member_values if v < threshold_f) / len(member_values)
+        gaussian_cdf = float(norm.cdf(threshold_f, loc=mean, scale=cdf_std))
+
+    # Blend: 70% ensemble fraction + 30% Gaussian CDF
+    model_prob = (
+        ENSEMBLE_FRACTION_WEIGHT * ensemble_fraction
+        + GAUSSIAN_CDF_WEIGHT * gaussian_cdf
+    )
 
     # Clamp to avoid extreme values
     model_prob = max(0.05, min(0.95, model_prob))
@@ -96,7 +128,7 @@ def compute_probability(
     confidence = 1.0 - (adj_std / 10.0)
     confidence = max(0.3, min(0.95, confidence))
 
-    # Flag if Gaussian CDF and raw fraction disagree by >15%
+    # Flag if blended prob and raw fraction disagree by >15%
     low_confidence_flag = abs(model_prob - ensemble_fraction) > 0.15
 
     return ProbabilityResult(
@@ -164,6 +196,7 @@ def compute_multi_source_probability(
     threshold_f: float,
     direction: str,           # "above" or "below"
     target_date: date,
+    metric: str = "high",     # "high" or "low" — selects std floor
 ) -> Optional[MultiSourceResult]:
     """
     Compute ensemble-of-ensembles probability from multiple weather sources.
@@ -195,10 +228,23 @@ def compute_multi_source_probability(
             std = 0.1
         adj_std = std * factor
 
+        # Apply std floor before CDF (same policy as single-source compute_probability)
+        std_floor = STD_FLOOR_HIGH if metric != "low" else STD_FLOOR_LOW
+        cdf_std = max(adj_std, std_floor)
+
+        # Raw ensemble fraction — PRIMARY signal
         if direction == "above":
-            prob = float(1.0 - norm.cdf(threshold_f, loc=mean, scale=adj_std))
+            ensemble_frac = sum(1 for v in members if v > threshold_f) / len(members)
+            gaussian_cdf = float(1.0 - norm.cdf(threshold_f, loc=mean, scale=cdf_std))
         else:
-            prob = float(norm.cdf(threshold_f, loc=mean, scale=adj_std))
+            ensemble_frac = sum(1 for v in members if v < threshold_f) / len(members)
+            gaussian_cdf = float(norm.cdf(threshold_f, loc=mean, scale=cdf_std))
+
+        # Blend: 70% ensemble fraction + 30% Gaussian CDF
+        prob = (
+            ENSEMBLE_FRACTION_WEIGHT * ensemble_frac
+            + GAUSSIAN_CDF_WEIGHT * gaussian_cdf
+        )
 
         prob = max(0.05, min(0.95, prob))
 
