@@ -21,7 +21,7 @@ class FilteredMarket:
     ticker: str
     city: str
     title: str
-    reason: str           # "bracket", "no_price", "low_ask", "low_volume", "expired"
+    reason: str           # "bracket", "no_price", "low_ask", "low_volume", "expired", "wide_spread"
     ask_size: float = 0.0
     volume_24h: float = 0.0
     yes_price: float = 0.0
@@ -440,6 +440,27 @@ async def fetch_kalshi_weather_markets(
                         yes_bid = yes_bid_c / 100.0
                     else:
                         yes_bid = 0.0   # unavailable in bulk listing
+
+                    # ── Bid/ask spread filter ─────────────────────────────
+                    # Wide spreads indicate adverse selection risk and thin
+                    # liquidity. Only applied when bid data is actually present.
+                    # NOTE: Kalshi's bulk /markets endpoint does not expose
+                    # yes_bid, so this filter will not fire until the API
+                    # returns bid prices in the listing response.
+                    _MAX_SPREAD = 0.08
+                    if yes_bid > 0:
+                        spread = yes_price - yes_bid   # ask - bid
+                        if spread > _MAX_SPREAD:
+                            logger.info(
+                                f"WIDE SPREAD SKIP {ticker}: "
+                                f"ask={yes_price:.2f} bid={yes_bid:.2f} "
+                                f"spread={spread:.2f} > {_MAX_SPREAD:.2f}"
+                            )
+                            report.filtered.append(FilteredMarket(
+                                ticker=ticker, city=city_key, title=title,
+                                reason="wide_spread", ask_size=yes_ask_size,
+                                volume_24h=volume_24h, yes_price=yes_price))
+                            continue
 
                     report.markets.append(WeatherMarket(
                         slug=ticker, market_id=ticker, platform="kalshi",
