@@ -332,6 +332,27 @@ async def scan_for_weather_signals() -> ScanReport:
 
     signals.sort(key=lambda s: abs(s.edge), reverse=True)
 
+    # ── Deduplicate correlated bets ───────────────────────────────────────────
+    # For each city+date+metric group, only keep the single signal with the
+    # highest absolute edge. Multiple thresholds for the same city/day resolve
+    # on the same observed temperature — betting all of them is not
+    # diversification, it multiplies the same correlated risk.
+    signals = _dedup_correlated(signals)
+
+    # ── Resize using live available bankroll ──────────────────────────────────
+    # Kelly was computed with the static INITIAL_BANKROLL. Subtract capital
+    # already committed to open (unresolved) paper trades so we never size
+    # as if we have more money than we actually do.
+    available = _available_bankroll()
+    if available < settings.INITIAL_BANKROLL:
+        ratio = available / settings.INITIAL_BANKROLL
+        for s in signals:
+            s.suggested_size = round(s.suggested_size * ratio, 2)
+        logger.info(
+            f"Bankroll scaling: {available:.2f}/{settings.INITIAL_BANKROLL:.2f} available "
+            f"→ sizing multiplied by {ratio:.2f}"
+        )
+
     # Annotate filter reason on each signal
     low_agreement_filtered = []
     below_edge = []
@@ -370,6 +391,50 @@ async def scan_for_weather_signals() -> ScanReport:
         low_agreement_filtered=low_agreement_filtered,
     )
     return report
+
+
+def _dedup_correlated(signals: List[WeatherTradingSignal]) -> List[WeatherTradingSignal]:
+    """
+    For each (city, date, metric) group keep only the signal with the
+    highest absolute edge. All thresholds for the same city+day+metric
+    resolve on the same observed temperature, so they are perfectly
+    correlated — holding more than one is just multiplying exposure, not
+    diversifying.
+    """
+    best: dict = {}  # key -> signal with highest |edge|
+    for s in signals:
+        key = (s.market.city_key, s.market.target_date, s.market.metric)
+        if key not in best or abs(s.edge) > abs(best[key].edge):
+            best[key] = s
+
+    kept = list(best.values())
+    dropped = len(signals) - len(kept)
+    if dropped:
+        logger.info(
+            f"Dedup: dropped {dropped} correlated signal(s) "
+            f"({len(kept)} unique city+date+metric groups remain)"
+        )
+    return kept
+
+
+def _available_bankroll() -> float:
+    """
+    Return bankroll minus capital currently locked in open paper trades.
+    Falls back to INITIAL_BANKROLL if the DB is unreachable.
+    """
+    try:
+        from backend.models.paper_trade import PaperSessionLocal, PaperTrade
+        db = PaperSessionLocal()
+        try:
+            open_trades = db.query(PaperTrade).filter(PaperTrade.resolved == False).all()
+            committed = sum(t.kelly_size for t in open_trades if t.kelly_size)
+            available = max(0.0, settings.INITIAL_BANKROLL - committed)
+            return available
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug(f"Could not compute available bankroll: {e}")
+        return settings.INITIAL_BANKROLL
 
 
 def _persist_signals(signals: List[WeatherTradingSignal]):
