@@ -91,7 +91,8 @@ def main():
             print(f"    Entry:      {t.contracts} contracts @ {t.entry_price:.2%}  (${t.kelly_size:.0f} Kelly)")
             agr = getattr(t, "agreement", "MEDIUM") or "MEDIUM"
             print(f"    Signal:     model={t.model_prob:.1%}  market={t.market_price:.1%}  edge={t.edge:+.1%}  conf={t.confidence:.0%}  agreement={agr}")
-            print(f"    Forecast:   mean={t.forecast_mean:.1f}°F  std={t.forecast_std:.1f}°F")
+            if t.forecast_mean is not None and t.forecast_std is not None:
+                print(f"    Forecast:   mean={t.forecast_mean:.1f}°F  std={t.forecast_std:.1f}°F")
             print(f"    Logged:     {t.created_at.strftime('%Y-%m-%d %H:%M')} UTC  |  Resolves: {t.resolution_date}")
             print(f"    Result:     {fmt_result(t)}  |  {pnl_str}")
 
