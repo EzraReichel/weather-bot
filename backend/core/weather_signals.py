@@ -340,9 +340,10 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     edge = model_yes_prob - market_yes_prob
     direction = "yes" if edge >= 0 else "no"
 
-    # Entry price filter
+    # Entry price filters — too cheap or too expensive
     entry_price = market.yes_price if direction == "yes" else market.no_price
-    entry_price_filtered = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
+    entry_too_high = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
+    entry_too_low  = entry_price < settings.WEATHER_MIN_ENTRY_PRICE
 
     # Kelly sizing
     suggested_size = kelly_size(
@@ -355,7 +356,7 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     )
     suggested_size = min(suggested_size, settings.WEATHER_MAX_TRADE_SIZE)
 
-    if entry_price_filtered:
+    if entry_too_high or entry_too_low:
         edge = 0.0
 
     # Reasoning string
@@ -364,8 +365,10 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     status = "ACTIONABLE" if abs(edge) >= req_edge else "FILTERED"
 
     filter_notes = []
-    if entry_price_filtered:
+    if entry_too_high:
         filter_notes.append(f"entry {entry_price:.0%} > max {settings.WEATHER_MAX_ENTRY_PRICE:.0%}")
+    if entry_too_low:
+        filter_notes.append(f"entry {entry_price:.0%} < min {settings.WEATHER_MIN_ENTRY_PRICE:.0%}")
     if agreement == "LOW":
         filter_notes.append(f"models disagree ({req_edge:.0%} edge required)")
     filter_note = f" [{', '.join(filter_notes)}]" if filter_notes else ""
@@ -416,7 +419,7 @@ async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradin
     direction = "yes" if edge >= 0 else "no"
     entry_price = market.yes_price if direction == "yes" else market.no_price
 
-    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE:
+    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < settings.WEATHER_MIN_ENTRY_PRICE:
         edge = 0.0
 
     suggested_size = kelly_size(
