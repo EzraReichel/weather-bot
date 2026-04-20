@@ -40,9 +40,11 @@ GAUSSIAN_CDF_WEIGHT      = 0.30
 
 def _lead_time_factor(target_date: date) -> float:
     """Compute uncertainty inflation factor based on hours until market resolution."""
-    now = datetime.utcnow()
-    # Resolution is end of target_date (midnight UTC next day)
-    resolution_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59)
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+    now = datetime.now(ET)
+    # Kalshi temperature markets settle at end of day ET (11:59 PM ET).
+    resolution_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=ET)
     hours_out = max(0.0, (resolution_dt - now).total_seconds() / 3600.0)
 
     for lo, hi, factor in LEAD_TIME_FACTORS:
