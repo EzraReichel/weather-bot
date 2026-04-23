@@ -13,9 +13,23 @@ from backend.core.probability import (
     MultiSourceResult,
     LOW_CONFIDENCE_EDGE_OVERRIDE,
 )
+
+# When model_prob hits the 0.05/0.95 probability floor it means the raw blend
+# wanted to go even more extreme, but we clamp it.  Those trades win ~45% of the
+# time in practice despite the model claiming 95% confidence, so we use a less
+# extreme stand-in probability *only for Kelly sizing* to avoid over-sizing.
 from backend.data.weather import fetch_ensemble_forecast, CITY_CONFIG, get_climatology_normal
 from backend.data.weather_markets import WeatherMarket
 from backend.models.database import SessionLocal, Signal
+
+# When model_prob hits the 0.05/0.95 probability floor it means the raw blend
+# wanted to go even more extreme, but we clamp it.  Those trades win ~45% of the
+# time in practice despite the model claiming 95% confidence, so we use a less
+# extreme stand-in probability *only for Kelly sizing* to avoid over-sizing.
+PROB_FLOOR          = 0.05
+PROB_CEILING        = 0.95
+PROB_FLOOR_SIZING   = 0.15   # substitute when model_prob == PROB_FLOOR
+PROB_CEILING_SIZING = 0.85   # substitute when model_prob == PROB_CEILING
 
 logger = logging.getLogger("weatherbot")
 
@@ -345,9 +359,16 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     entry_too_high = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
     entry_too_low  = entry_price < settings.WEATHER_MIN_ENTRY_PRICE
 
-    # Kelly sizing
+    # Kelly sizing — use a capped probability when the model hit the floor/ceiling
+    # so that extreme-confidence signals don't get outsized positions.
+    if model_yes_prob == PROB_FLOOR:
+        sizing_prob = PROB_FLOOR_SIZING
+    elif model_yes_prob == PROB_CEILING:
+        sizing_prob = PROB_CEILING_SIZING
+    else:
+        sizing_prob = model_yes_prob
     suggested_size = kelly_size(
-        model_prob=model_yes_prob,
+        model_prob=sizing_prob,
         market_price=market_yes_prob,
         direction=direction,
         bankroll=settings.INITIAL_BANKROLL,
@@ -424,8 +445,14 @@ async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradin
     if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < settings.WEATHER_MIN_ENTRY_PRICE:
         edge = 0.0
 
+    if model_yes_prob == PROB_FLOOR:
+        rain_sizing_prob = PROB_FLOOR_SIZING
+    elif model_yes_prob == PROB_CEILING:
+        rain_sizing_prob = PROB_CEILING_SIZING
+    else:
+        rain_sizing_prob = model_yes_prob
     suggested_size = kelly_size(
-        model_prob=model_yes_prob,
+        model_prob=rain_sizing_prob,
         market_price=market_yes_prob,
         direction=direction,
         bankroll=settings.INITIAL_BANKROLL,
