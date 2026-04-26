@@ -56,3 +56,7 @@ logs/
 htmlcov/
 .pytest_cache/
 *.pem
+
+# Keys / credentials
+key.txt
+*.key

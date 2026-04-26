@@ -354,6 +354,33 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     edge = model_yes_prob - market_yes_prob
     direction = "yes" if edge >= 0 else "no"
 
+    # High temp YES bets are systematically miscalibrated (14% empirical win rate
+    # vs model-implied 60-95%). Block them entirely.
+    if market.metric == "high" and direction == "yes":
+        return WeatherTradingSignal(
+            market=market,
+            model_probability=model_yes_prob,
+            market_probability=market_yes_prob,
+            edge=0.0,
+            direction="yes",
+            confidence=confidence,
+            kelly_fraction=0.0,
+            suggested_size=0.0,
+            reasoning=(
+                f"[FILTERED:high_yes_blocked] {market.city_name} high YES bets "
+                f"blocked — model overestimates warm days (empirical win rate 14%)"
+            ),
+            ensemble_mean=ensemble_mean,
+            ensemble_std=ensemble_std,
+            ensemble_members=ensemble_members,
+            low_confidence_flag=low_conf,
+            source_probs=source_probs_map,
+            agreement=agreement,
+            sources_used=sources_used,
+            outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+            filter_reason="high_yes_blocked",
+        )
+
     # Entry price filters — too cheap or too expensive
     entry_price = market.yes_price if direction == "yes" else market.no_price
     entry_too_high = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
@@ -442,7 +469,10 @@ async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradin
     direction = "yes" if edge >= 0 else "no"
     entry_price = market.yes_price if direction == "yes" else market.no_price
 
-    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < settings.WEATHER_MIN_ENTRY_PRICE:
+    # Rain NO bets at very low entry prices (YES priced >90¢) are strong opportunities
+    # — use a tighter floor of 0.05 instead of the global WEATHER_MIN_ENTRY_PRICE.
+    rain_min_entry = 0.05
+    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < rain_min_entry:
         edge = 0.0
 
     if model_yes_prob == PROB_FLOOR:

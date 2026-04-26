@@ -42,12 +42,12 @@ A selective trading bot that exploits pricing inefficiencies in Kalshi predictio
                     └─────────────────┬─────────────────┘
                                       ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         LAYER 3: EDGE CALCULATOR                             │
-│                                                                              │
-│  edge = bot_probability - market_probability                                 │
-│                                                                              │
+│                         LAYER 3: EDGE CALCULATOR                            │
+│                                                                             │
+│  edge = bot_probability - market_probability                                │
+│                                                                             │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                         FILTER CHAIN                                 │    │
+│  │                         FILTER CHAIN                                 │    
 │  │  1. Minimum Edge: 10-18pp depending on category + confidence        │    │
 │  │  2. Confidence: Ensemble agreement, source correlation              │    │
 │  │  3. Time Decay: 6h=10pp, 12h=12pp, 24h=14pp, 48h=18pp              │    │

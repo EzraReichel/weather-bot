@@ -36,6 +36,14 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
 
     contracts = max(1, int(signal.suggested_size / entry_price))
 
+    # Determine whether this trade implies a warm or cold outlook.
+    # warm: above-threshold YES, or below-threshold NO
+    # cold: above-threshold NO, or below-threshold YES
+    new_is_warm = (
+        (market.direction == "above" and signal.direction == "yes") or
+        (market.direction == "below" and signal.direction == "no")
+    )
+
     db = PaperSessionLocal()
     try:
         # Deduplicate: skip if any unresolved trade already exists for this ticker
@@ -46,6 +54,27 @@ def log_paper_trade(signal) -> Optional[PaperTrade]:
         if existing:
             logger.debug(f"Duplicate signal skipped: {market.market_id} (already pending)")
             return None
+
+        # Contradiction guard: skip if an unresolved trade for the same city/date
+        # already exists with the opposite temperature direction.
+        same_city_trades = db.query(PaperTrade).filter(
+            PaperTrade.city == market.city_key,
+            PaperTrade.resolution_date == market.target_date.isoformat(),
+            PaperTrade.resolved == False,
+        ).all()
+        for prior in same_city_trades:
+            prior_is_warm = (
+                (prior.market_direction == "above" and prior.side == "yes") or
+                (prior.market_direction == "below" and prior.side == "no")
+            )
+            if prior_is_warm != new_is_warm:
+                logger.warning(
+                    f"Contradictory trade skipped: {market.market_id} "
+                    f"({'warm' if new_is_warm else 'cold'}) conflicts with "
+                    f"{prior.ticker} ({'warm' if prior_is_warm else 'cold'}) "
+                    f"for {market.city_key} on {market.target_date.isoformat()}"
+                )
+                return None
 
         pt = PaperTrade(
             ticker           = market.market_id,
