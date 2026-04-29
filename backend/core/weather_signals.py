@@ -354,37 +354,16 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     edge = model_yes_prob - market_yes_prob
     direction = "yes" if edge >= 0 else "no"
 
-    # High temp YES bets are systematically miscalibrated (14% empirical win rate
-    # vs model-implied 60-95%). Block them entirely.
-    if market.metric == "high" and direction == "yes":
-        return WeatherTradingSignal(
-            market=market,
-            model_probability=model_yes_prob,
-            market_probability=market_yes_prob,
-            edge=0.0,
-            direction="yes",
-            confidence=confidence,
-            kelly_fraction=0.0,
-            suggested_size=0.0,
-            reasoning=(
-                f"[FILTERED:high_yes_blocked] {market.city_name} high YES bets "
-                f"blocked — model overestimates warm days (empirical win rate 14%)"
-            ),
-            ensemble_mean=ensemble_mean,
-            ensemble_std=ensemble_std,
-            ensemble_members=ensemble_members,
-            low_confidence_flag=low_conf,
-            source_probs=source_probs_map,
-            agreement=agreement,
-            sources_used=sources_used,
-            outlier_dampened=multi_result.outlier_dampened if multi_result else None,
-            filter_reason="high_yes_blocked",
-        )
-
-    # Entry price filters — too cheap or too expensive
+    # Entry price filters — YES and NO use different floors.
+    # YES bets under 30¢ have a 7% empirical win rate regardless of model edge;
+    # the signal only becomes reliable at 30¢+. NO bets keep the 10¢ floor.
     entry_price = market.yes_price if direction == "yes" else market.no_price
+    yes_min_entry = 0.30
     entry_too_high = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
-    entry_too_low  = entry_price < settings.WEATHER_MIN_ENTRY_PRICE
+    entry_too_low  = (
+        entry_price < yes_min_entry if direction == "yes"
+        else entry_price < settings.WEATHER_MIN_ENTRY_PRICE
+    )
 
     # Kelly sizing — use a capped probability when the model hit the floor/ceiling
     # so that extreme-confidence signals don't get outsized positions.
@@ -417,7 +396,8 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     if entry_too_high:
         filter_notes.append(f"entry {entry_price:.0%} > max {settings.WEATHER_MAX_ENTRY_PRICE:.0%}")
     if entry_too_low:
-        filter_notes.append(f"entry {entry_price:.0%} < min {settings.WEATHER_MIN_ENTRY_PRICE:.0%}")
+        min_shown = yes_min_entry if direction == "yes" else settings.WEATHER_MIN_ENTRY_PRICE
+        filter_notes.append(f"entry {entry_price:.0%} < min {min_shown:.0%} ({'YES floor' if direction == 'yes' else 'NO floor'})")
     if agreement == "LOW":
         filter_notes.append(f"models disagree ({req_edge:.0%} edge required)")
     filter_note = f" [{', '.join(filter_notes)}]" if filter_notes else ""
