@@ -357,8 +357,25 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     # Entry price filters — YES and NO use different floors.
     # YES bets under 30¢ have a 7% empirical win rate regardless of model edge;
     # the signal only becomes reliable at 30¢+. NO bets keep the 10¢ floor.
+    #
+    # Cold-day exception: a YES bet on a BELOW-direction market may drop back to
+    # the standard 10¢ floor when all three hold:
+    #   1. market_direction == "below"  (YES wins if temp stays under the threshold)
+    #   2. ensemble_mean is ≥ 4°F below the threshold  (model is clearly calling cold)
+    #   3. NWS probability ≥ 85%  (the settlement-source model is highly confident)
+    # This is the only sub-category of cheap YES bets that has shown a positive
+    # win rate (3W/1L in historical data). Logged with filter_reason="cold_day_exception"
+    # so the pattern can be tracked separately.
     entry_price = market.yes_price if direction == "yes" else market.no_price
-    yes_min_entry = 0.30
+    nws_prob = source_probs_map.get("nws", 0.0)
+    cold_margin = (market.threshold_f - ensemble_mean) if market.market_direction == "below" else 0.0
+    cold_day_exception = (
+        direction == "yes"
+        and market.market_direction == "below"
+        and cold_margin >= 4.0
+        and nws_prob >= 0.85
+    )
+    yes_min_entry = settings.WEATHER_MIN_ENTRY_PRICE if cold_day_exception else 0.30
     entry_too_high = entry_price > settings.WEATHER_MAX_ENTRY_PRICE
     entry_too_low  = (
         entry_price < yes_min_entry if direction == "yes"
@@ -429,7 +446,11 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         agreement=agreement,
         sources_used=sources_used,
         outlier_dampened=multi_result.outlier_dampened if multi_result else None,
-        filter_reason="entry_price" if entry_price_filtered else "",
+        filter_reason=(
+            "cold_day_exception" if cold_day_exception and not entry_price_filtered
+            else "entry_price" if entry_price_filtered
+            else ""
+        ),
     )
 
 
