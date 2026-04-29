@@ -180,6 +180,7 @@ def send_daily_summary(
     daily_paper_pnl: float,
     paper_stats: dict,
     scan_report=None,
+    daily_brier: Optional[float] = None,
 ) -> bool:
     """Send combined end-of-day summary to Discord at 11 PM ET."""
     if not settings.DISCORD_WEBHOOK_URL:
@@ -194,6 +195,7 @@ def send_daily_summary(
     losses = paper_stats.get("losses", 0)
     brier = paper_stats.get("brier")
     brier_str = f"{brier:.3f}" if brier is not None else "n/a"
+    daily_brier_str = f"{daily_brier:.3f}" if daily_brier is not None else "n/a"
 
     # Paper trades logged today — brief list
     if paper_logged_today:
@@ -237,7 +239,8 @@ def send_daily_summary(
         {"name": "Today's P&L",          "value": f"**{pnl_sign}${daily_paper_pnl:.2f}**", "inline": True},
         {"name": "Running P&L",          "value": f"**{running_sign}${running_pnl:.2f}**", "inline": True},
         {"name": "All-time W/L",         "value": f"{wins}W / {losses}L",     "inline": True},
-        {"name": "Brier Score",          "value": brier_str,                   "inline": True},
+        {"name": "Brier (today)",        "value": daily_brier_str,             "inline": True},
+        {"name": "Brier (all-time)",     "value": brier_str,                   "inline": True},
         {"name": "Filter Breakdown",     "value": filter_detail,               "inline": False},
         {"name": "New Paper Trades",     "value": logged_text,                 "inline": False},
         {"name": "Resolved Today",       "value": resolved_text,               "inline": False},
@@ -254,6 +257,46 @@ def send_daily_summary(
     success = _post_embed(embed)
     if success:
         logger.info("Discord daily summary sent")
+    return success
+
+
+def send_trade_settled_alert(trade) -> bool:
+    """Send a Discord alert when a paper trade resolves (win or loss)."""
+    if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    icon = "✅" if trade.result == "win" else "❌"
+    kalshi_result = "YES" if (trade.actual_temp or 0) >= 1.0 else "NO"
+    pnl_sign = "+" if (trade.pnl or 0) >= 0 else ""
+    color = COLOR_GREEN if trade.result == "win" else COLOR_RED
+
+    yes_outcome = 1.0 if (trade.actual_temp or 0) >= 1.0 else 0.0
+    brier_contrib = (trade.model_prob - yes_outcome) ** 2
+
+    fields = [
+        {"name": "Ticker",            "value": f"`{trade.ticker}`",                       "inline": True},
+        {"name": "Side",              "value": f"**{trade.side.upper()}**",                "inline": True},
+        {"name": "Result",            "value": f"{icon} **{trade.result.upper()}**",       "inline": True},
+        {"name": "Kalshi Outcome",    "value": kalshi_result,                              "inline": True},
+        {"name": "Entry Price",       "value": f"{trade.entry_price:.2%}",                 "inline": True},
+        {"name": "P&L",               "value": f"**{pnl_sign}${trade.pnl:.2f}**",         "inline": True},
+        {"name": "Model Prob (YES)",  "value": f"{trade.model_prob:.1%}",                  "inline": True},
+        {"name": "Edge at Entry",     "value": f"{trade.edge:+.1%}",                       "inline": True},
+        {"name": "Brier (this trade)","value": f"{brier_contrib:.3f}",                     "inline": True},
+    ]
+
+    embed = {
+        "title": f"{icon} SETTLED — {trade.ticker}",
+        "description": f"**{trade.city.upper()}** · {trade.metric.upper()} · {trade.threshold_f:.0f}°F · {trade.resolution_date}",
+        "color": color,
+        "fields": fields,
+        "footer": {"text": "Kalshi Weather Arb Bot · Settlement"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    success = _post_embed(embed)
+    if success:
+        logger.info(f"Discord settlement alert sent: {trade.ticker} {trade.result}")
     return success
 
 

@@ -152,6 +152,8 @@ async def paper_settlement_job():
     """Hourly: settle paper trades whose resolution date has passed."""
     try:
         from backend.core.paper_trading import settle_paper_trades
+        from backend.notifications.discord import send_trade_settled_alert
+
         settled = await settle_paper_trades()
         if settled:
             wins   = sum(1 for t in settled if t.result == "win")
@@ -160,6 +162,11 @@ async def paper_settlement_job():
             logger.info(
                 f"Paper trades settled: {len(settled)} ({wins}W/{losses}L)  P&L ${pnl:+.2f}"
             )
+            for t in settled:
+                try:
+                    send_trade_settled_alert(t)
+                except Exception as e:
+                    logger.error(f"Failed to send settlement alert for {t.ticker}: {e}")
     except Exception as e:
         logger.error(f"Paper settlement error: {e}", exc_info=True)
 
@@ -218,6 +225,16 @@ async def daily_summary_job():
                 if t.resolved_at and t.resolved_at >= today_start_utc
             ]
             daily_paper_pnl = sum(t.pnl for t in resolved_today if t.pnl is not None)
+
+            # Daily Brier: mean squared error only for trades settled today
+            if resolved_today:
+                daily_brier_scores = [
+                    (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
+                    for t in resolved_today
+                ]
+                daily_brier = sum(daily_brier_scores) / len(daily_brier_scores)
+            else:
+                daily_brier = None
         finally:
             paper_db.close()
 
@@ -229,6 +246,7 @@ async def daily_summary_job():
             daily_paper_pnl=daily_paper_pnl,
             paper_stats=paper_stats,
             scan_report=_latest_scan_report,
+            daily_brier=daily_brier,
         )
 
     except Exception as e:
