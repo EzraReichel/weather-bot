@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     WEATHER_MIN_ENTRY_PRICE: float = 0.10  # Skip markets where our entry is < 10¢ (model unreliable at extremes)
     WEATHER_MAX_ENTRY_PRICE: float = 0.70
     WEATHER_MAX_TRADE_SIZE: float = 100.0
-    WEATHER_CITIES: str = "nyc,chicago,miami,denver"  # los_angeles removed: model miscalibrated for coastal temps
+    WEATHER_CITIES: str = "nyc,chicago,denver,austin,houston,boston,washington_dc,phoenix,seattle,san_francisco,atlanta,dallas,las_vegas,minneapolis,new_orleans,oklahoma_city,san_antonio,philadelphia"  # miami/los_angeles excluded: model miscalibrated
 
     # Trading hours gate (US/Eastern) — paper trades and Discord alerts only
     # fire inside this window. Scanning still runs outside hours for data.

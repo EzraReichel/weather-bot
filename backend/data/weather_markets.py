@@ -56,6 +56,11 @@ class WeatherMarket:
     yes_ask: float = 0.0     # Best ask for YES (filled from API when available)
     yes_bid: float = 0.0     # Best bid for YES (0 = unavailable)
 
+    @property
+    def market_direction(self) -> str:
+        """Alias for direction — used by weather_signals.py cold-day exception logic."""
+        return self.direction
+
 
 def _parse_weather_market_title(title: str) -> Optional[dict]:
     """
