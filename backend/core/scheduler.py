@@ -151,8 +151,9 @@ async def discord_command_poll_job():
 async def paper_settlement_job():
     """Hourly: settle paper trades whose resolution date has passed."""
     try:
-        from backend.core.paper_trading import settle_paper_trades
+        from backend.core.paper_trading import settle_paper_trades, get_paper_stats
         from backend.notifications.discord import send_trade_settled_alert
+        from backend.config import settings
 
         settled = await settle_paper_trades()
         if settled:
@@ -162,9 +163,11 @@ async def paper_settlement_job():
             logger.info(
                 f"Paper trades settled: {len(settled)} ({wins}W/{losses}L)  P&L ${pnl:+.2f}"
             )
+            stats    = get_paper_stats()
+            bankroll = settings.INITIAL_BANKROLL + stats["total_pnl"]
             for t in settled:
                 try:
-                    send_trade_settled_alert(t)
+                    send_trade_settled_alert(t, bankroll=bankroll)
                 except Exception as e:
                     logger.error(f"Failed to send settlement alert for {t.ticker}: {e}")
     except Exception as e:

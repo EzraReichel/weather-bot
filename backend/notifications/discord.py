@@ -190,6 +190,7 @@ def send_daily_summary(
     running_pnl = paper_stats.get("total_pnl", 0.0)
     running_sign = "+" if running_pnl >= 0 else ""
     color = COLOR_GREEN if running_pnl >= 0 else COLOR_RED
+    bankroll = settings.INITIAL_BANKROLL + running_pnl
 
     wins  = paper_stats.get("wins", 0)
     losses = paper_stats.get("losses", 0)
@@ -238,6 +239,7 @@ def send_daily_summary(
         {"name": "Paper Trades Today",   "value": str(len(paper_logged_today)),"inline": True},
         {"name": "Today's P&L",          "value": f"**{pnl_sign}${daily_paper_pnl:.2f}**", "inline": True},
         {"name": "Running P&L",          "value": f"**{running_sign}${running_pnl:.2f}**", "inline": True},
+        {"name": "Bankroll",             "value": f"**${bankroll:,.2f}**",                 "inline": True},
         {"name": "All-time W/L",         "value": f"{wins}W / {losses}L",     "inline": True},
         {"name": "Brier (today)",        "value": daily_brier_str,             "inline": True},
         {"name": "Brier (all-time)",     "value": brier_str,                   "inline": True},
@@ -260,7 +262,7 @@ def send_daily_summary(
     return success
 
 
-def send_trade_settled_alert(trade) -> bool:
+def send_trade_settled_alert(trade, bankroll: Optional[float] = None) -> bool:
     """Send a Discord alert when a paper trade resolves (win or loss)."""
     if not settings.DISCORD_WEBHOOK_URL:
         return False
@@ -284,6 +286,8 @@ def send_trade_settled_alert(trade) -> bool:
         {"name": "Edge at Entry",     "value": f"{trade.edge:+.1%}",                       "inline": True},
         {"name": "Brier (this trade)","value": f"{brier_contrib:.3f}",                     "inline": True},
     ]
+    if bankroll is not None:
+        fields.append({"name": "Bankroll", "value": f"**${bankroll:,.2f}**", "inline": True})
 
     embed = {
         "title": f"{icon} SETTLED — {trade.ticker}",
@@ -411,6 +415,7 @@ def send_paper_report() -> bool:
 
     pnl_sign    = "+" if pnl >= 0 else ""
     color       = COLOR_GREEN if pnl >= 0 else COLOR_RED
+    bankroll    = settings.INITIAL_BANKROLL + pnl
     win_rate    = f"{wins/(resolved)*100:.0f}%" if resolved > 0 else "n/a"
     brier_str   = f"{brier:.4f}" if brier is not None else "n/a"
 
@@ -476,6 +481,7 @@ def send_paper_report() -> bool:
         {"name": "Pending",           "value": str(pending),                   "inline": True},
         {"name": "W/L",               "value": f"{wins}W / {losses}L ({win_rate})", "inline": True},
         {"name": "Running P&L",       "value": f"**{pnl_sign}${pnl:.2f}**",  "inline": True},
+        {"name": "Bankroll",          "value": f"**${bankroll:,.2f}**",       "inline": True},
         {"name": "Avg Edge at Entry", "value": f"{avg_edge:+.1%}",            "inline": True},
         {"name": "Brier Score",       "value": brier_str,                     "inline": True},
         {"name": "Agreement Breakdown", "value": agr_text,                    "inline": False},
