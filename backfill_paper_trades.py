@@ -60,7 +60,7 @@ def parse_ticker(ticker: str):
 # ── Fetch Kalshi result ───────────────────────────────────────────────────────
 async def fetch_kalshi_result(ticker: str):
     """Return 'yes', 'no', or None if not resolved."""
-    from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
+    from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
     if not kalshi_credentials_present():
         logger.warning("No Kalshi credentials — cannot fetch results")
         return None
@@ -77,9 +77,9 @@ async def fetch_kalshi_result(ticker: str):
 
 # ── Main backfill ─────────────────────────────────────────────────────────────
 async def main():
-    from backend.config import settings
-    from backend.models.database import engine, init_db
-    from backend.models.paper_trade import init_paper_db, PaperTrade, PaperSessionLocal
+    from weatherbot.config import settings
+    from weatherbot.models.database import engine, init_db
+    from weatherbot.models.paper_trade import init_paper_db, PaperTrade, PaperSessionLocal
 
     logger.info("Initializing Render Postgres DB...")
     init_db()
@@ -171,7 +171,7 @@ async def main():
 
     # Now settle all unresolved trades
     logger.info("Checking Kalshi for resolved markets...")
-    from backend.config import settings as cfg
+    from weatherbot.config import settings as cfg
 
     db = PaperSessionLocal()
     try:

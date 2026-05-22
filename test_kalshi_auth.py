@@ -8,8 +8,8 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.config import settings
-from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
+from weatherbot.config import settings
+from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
 
 
 async def main():

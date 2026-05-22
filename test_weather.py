@@ -7,8 +7,8 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.data.weather import fetch_ensemble_forecast
-from backend.core.probability import compute_probability
+from weatherbot.data.weather import fetch_ensemble_forecast
+from weatherbot.core.probability import compute_probability
 
 
 async def main():

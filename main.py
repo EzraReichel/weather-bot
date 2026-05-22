@@ -32,8 +32,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
 
-from backend.config import settings
-from backend.models.database import init_db, SessionLocal, BotState
+from weatherbot.config import settings
+from weatherbot.models.database import init_db, SessionLocal, BotState
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(docs_url=None, redoc_url=None)
@@ -50,7 +50,7 @@ async def health():
 @app.get("/report")
 async def trigger_report():
     """Post a full paper trading report to Discord. Hit from anywhere."""
-    from backend.notifications.discord import send_paper_report
+    from weatherbot.notifications.discord import send_paper_report
     ok = send_paper_report()
     return JSONResponse({"sent": ok})
 
@@ -110,23 +110,23 @@ async def on_startup():
                 f"Scan: {settings.SCAN_INTERVAL_SECONDS}s")
 
     try:
-        from backend.notifications.discord import send_startup_message
+        from weatherbot.notifications.discord import send_startup_message
         send_startup_message(settings.SIMULATION_MODE, settings.INITIAL_BANKROLL)
     except Exception as e:
         logger.warning(f"Discord startup ping failed: {e}")
 
-    from backend.models.paper_trade import init_paper_db
+    from weatherbot.models.paper_trade import init_paper_db
     init_paper_db()
     logger.info("Paper trading DB initialized — paper_trades.db")
 
-    from backend.core.scheduler import start_scheduler
+    from weatherbot.core.scheduler import start_scheduler
     start_scheduler()
     logger.info(f"Mission Control UI at http://0.0.0.0:{settings.PORT}")
 
 
 @app.on_event("shutdown")
 async def on_shutdown():
-    from backend.core.scheduler import stop_scheduler
+    from weatherbot.core.scheduler import stop_scheduler
     stop_scheduler()
 
     db = SessionLocal()

@@ -24,7 +24,7 @@ def section(title: str):
 
 # ── 1. Config ─────────────────────────────────────────────────────────────────
 section("1. CONFIGURATION")
-from backend.config import settings
+from weatherbot.config import settings
 print(f"  DATABASE_URL:      {settings.DATABASE_URL[:40]}...")
 print(f"  DRY_RUN:           {settings.DRY_RUN}")
 print(f"  MIN_EDGE:          {settings.MIN_EDGE_THRESHOLD:.0%}")
@@ -36,8 +36,8 @@ print(f"  DISCORD_WEBHOOK:   {'✓ set' if settings.DISCORD_WEBHOOK_URL else '�
 
 # ── 2. DB init ────────────────────────────────────────────────────────────────
 section("2. DATABASE")
-from backend.models.database import init_db, engine as main_engine
-from backend.models.paper_trade import init_paper_db, PaperSessionLocal, PaperTrade, ModelCityAccuracy, paper_engine
+from weatherbot.models.database import init_db, engine as main_engine
+from weatherbot.models.paper_trade import init_paper_db, PaperSessionLocal, PaperTrade, ModelCityAccuracy, paper_engine
 
 print(f"  Main engine:  {main_engine.dialect.name}  ({main_engine.url.database or main_engine.url.host})")
 print(f"  Paper engine: {paper_engine.dialect.name}  (same={paper_engine is main_engine})")
@@ -83,7 +83,7 @@ finally:
 # ── 4. NWS settlement test ────────────────────────────────────────────────────
 section("4. NWS SETTLEMENT (yesterday's NYC high/low)")
 async def test_nws():
-    from backend.data.weather import fetch_nws_observed_temperature
+    from weatherbot.data.weather import fetch_nws_observed_temperature
     yesterday = date.today() - timedelta(days=1)
     result = await fetch_nws_observed_temperature("nyc", yesterday)
     if result:
@@ -99,9 +99,9 @@ asyncio.run(test_nws())
 section("5. PAPER TRADE LOG/SETTLE SIMULATION")
 
 async def test_log_and_settle():
-    from backend.core.paper_trading import log_paper_trade, settle_paper_trades
-    from backend.data.weather_markets import WeatherMarket
-    from backend.core.weather_signals import WeatherTradingSignal
+    from weatherbot.core.paper_trading import log_paper_trade, settle_paper_trades
+    from weatherbot.data.weather_markets import WeatherMarket
+    from weatherbot.core.weather_signals import WeatherTradingSignal
 
     # Build a fake market that resolves yesterday so we can settle it immediately
     yesterday = date.today() - timedelta(days=1)
@@ -188,7 +188,7 @@ print(f"    Loss P&L: ${loss_pnl:.2f}")
 print(f"    Edge breakeven fee: {fee/(1-entry):.1%} edge required")
 
 # Verify kelly sizing
-from backend.core.probability import kelly_size
+from weatherbot.core.probability import kelly_size
 size = kelly_size(
     model_prob=0.70,
     market_price=0.50,
@@ -206,7 +206,7 @@ print(f"  Contracts at 0.50: {contracts_ex}")
 section("7. MANUAL SETTLEMENT (all eligible pending trades)")
 
 async def run_settlement():
-    from backend.core.paper_trading import settle_paper_trades
+    from weatherbot.core.paper_trading import settle_paper_trades
     settled = await settle_paper_trades()
     if settled:
         wins = sum(1 for t in settled if t.result == "win")

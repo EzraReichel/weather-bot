@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.config import settings
+from weatherbot.config import settings
 
 
 def main():
@@ -65,11 +65,11 @@ def main():
 
     # ── 2. Edge case: bad URL ─────────────────────────────────────
     print("\nEdge case: invalid webhook URL (should log error, not crash)...")
-    from backend.notifications import discord as disc_module
+    from weatherbot.notifications import discord as disc_module
     original_url = settings.DISCORD_WEBHOOK_URL
 
     # Temporarily monkeypatch
-    import backend.config as cfg
+    import weatherbot.config as cfg
     original = cfg.settings.DISCORD_WEBHOOK_URL
     cfg.settings.DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/invalid/bad"
 

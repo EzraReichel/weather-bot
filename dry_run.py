@@ -12,8 +12,8 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.config import settings
-from backend.models.database import init_db
+from weatherbot.config import settings
+from weatherbot.models.database import init_db
 
 # ── Results tracker ───────────────────────────────────────────────
 results = {
@@ -60,7 +60,7 @@ if not settings.DRY_RUN:
 section("1. KALSHI API AUTH")
 
 async def test_kalshi():
-    from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
+    from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
 
     if not kalshi_credentials_present():
         fail("kalshi_auth", "Credentials not configured (KALSHI_API_KEY_ID / PEM key missing)")
@@ -92,8 +92,8 @@ asyncio.run(test_kalshi())
 section("2. WEATHER DATA PIPELINE")
 
 async def test_weather():
-    from backend.data.weather import fetch_ensemble_forecast
-    from backend.core.probability import compute_probability
+    from weatherbot.data.weather import fetch_ensemble_forecast
+    from weatherbot.core.probability import compute_probability
 
     target = date.today() + timedelta(days=1)
 
@@ -138,7 +138,7 @@ asyncio.run(test_weather())
 section("3. DISCORD WEBHOOK")
 
 def test_discord():
-    from backend.notifications.discord import _post_embed
+    from weatherbot.notifications.discord import _post_embed
     from datetime import datetime, timezone
 
     if not settings.DISCORD_WEBHOOK_URL:
@@ -170,8 +170,8 @@ test_discord()
 section("4. FULL SIGNAL GENERATION SCAN")
 
 async def test_signals():
-    from backend.core.weather_signals import scan_for_weather_signals
-    from backend.notifications.discord import send_signal_alert
+    from weatherbot.core.weather_signals import scan_for_weather_signals
+    from weatherbot.notifications.discord import send_signal_alert
 
     init_db()
 
@@ -237,16 +237,16 @@ section("5. EDGE CASE CHECKS")
 
 async def test_edge_cases():
     all_ok = True
-    from backend.data.weather import fetch_ensemble_forecast
-    from backend.core.probability import compute_probability
-    from backend.notifications.discord import _post_embed
-    from backend.data.kalshi_markets import _parse_temp_ticker as _parse_kalshi_ticker
+    from weatherbot.data.weather import fetch_ensemble_forecast
+    from weatherbot.core.probability import compute_probability
+    from weatherbot.notifications.discord import _post_embed
+    from weatherbot.data.kalshi_markets import _parse_temp_ticker as _parse_kalshi_ticker
     target = date.today() + timedelta(days=1)
 
     # a) Zero open markets
     print("  a) Kalshi returns 0 open markets...")
     try:
-        from backend.data.kalshi_markets import fetch_kalshi_weather_markets
+        from weatherbot.data.kalshi_markets import fetch_kalshi_weather_markets
         # This should return [] gracefully if no creds or no markets
         report = await fetch_kalshi_weather_markets(["nyc"])
         print(f"     ✅ Returns report with {len(report.markets)} markets (no crash)")
@@ -269,7 +269,7 @@ async def test_edge_cases():
     # c) Invalid Discord webhook
     print("  c) Invalid Discord webhook URL...")
     try:
-        import backend.config as cfg
+        import weatherbot.config as cfg
         saved = cfg.settings.DISCORD_WEBHOOK_URL
         cfg.settings.DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/0/bad"
         r = _post_embed({"title": "test", "color": 0})
@@ -285,8 +285,8 @@ async def test_edge_cases():
     # d) Malformed PEM key
     print("  d) Malformed PEM key...")
     try:
-        from backend.data.kalshi_client import KalshiClient
-        import backend.config as cfg
+        from weatherbot.data.kalshi_client import KalshiClient
+        import weatherbot.config as cfg
         saved_pem = cfg.settings.KALSHI_PRIVATE_KEY_PEM
         saved_path = cfg.settings.KALSHI_PRIVATE_KEY_PATH
         cfg.settings.KALSHI_PRIVATE_KEY_PEM = "THIS IS NOT A VALID PEM"

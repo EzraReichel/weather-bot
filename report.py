@@ -6,8 +6,8 @@ Usage: python report.py
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.models.paper_trade import init_paper_db, PaperSessionLocal, PaperTrade
-from backend.core.paper_trading import get_paper_stats, get_model_accuracy
+from weatherbot.models.paper_trade import init_paper_db, PaperSessionLocal, PaperTrade
+from weatherbot.core.paper_trading import get_paper_stats, get_model_accuracy
 
 SEP  = "─" * 62
 SEP2 = "═" * 62

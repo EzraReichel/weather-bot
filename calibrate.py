@@ -27,8 +27,8 @@ from typing import Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 load_dotenv()
 
-from backend.data.kalshi_client import KalshiClient, kalshi_credentials_present
-from backend.data.kalshi_markets import (
+from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
+from weatherbot.data.kalshi_markets import (
     KNOWN_SERIES_MAP,
     MONTH_ABBR,
     NON_WEATHER_BLACKLIST,
@@ -36,8 +36,8 @@ from backend.data.kalshi_markets import (
     _parse_temp_ticker,
     _parse_rain_ticker,
 )
-from backend.core.weather_signals import generate_weather_signal
-from backend.data.weather_markets import WeatherMarket
+from weatherbot.core.weather_signals import generate_weather_signal
+from weatherbot.data.weather_markets import WeatherMarket
 
 logging.basicConfig(
     level=logging.INFO,

@@ -161,7 +161,7 @@ print(f"Unique settled T-ticker signals: {len(signals)}")
 
 # ── Fetch NWS actuals ─────────────────────────────────────────────────────────
 async def fetch_all_actuals(signals):
-    from backend.data.weather import fetch_nws_observed_temperature
+    from weatherbot.data.weather import fetch_nws_observed_temperature
 
     # Batch by (city, date) to avoid redundant calls
     needed = {}
