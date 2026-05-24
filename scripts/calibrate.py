@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Historical calibration backtest for the Kalshi weather arb bot.
 
@@ -20,6 +21,8 @@ import json
 import logging
 import math
 import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple

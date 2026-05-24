@@ -3,16 +3,20 @@
 Paper trading backtest report.
 Usage: python report.py
 """
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from dotenv import load_dotenv
 load_dotenv()
 
-from weatherbot.models.paper_trade import init_paper_db, PaperSessionLocal, PaperTrade
+from weatherbot.models.trade import init_trade_db, SessionLocal, Trade
 from weatherbot.core.paper_trading import get_paper_stats, get_model_accuracy
 
 SEP  = "─" * 62
 SEP2 = "═" * 62
 
-def fmt_result(t: PaperTrade) -> str:
+def fmt_result(t: Trade) -> str:
     if not t.resolved:
         return "PENDING"
     icon = "✅" if t.result == "win" else "❌"
@@ -20,7 +24,7 @@ def fmt_result(t: PaperTrade) -> str:
     return f"{icon} {t.result.upper()}  (Kalshi={kalshi}  side={t.side.upper()})"
 
 def main():
-    init_paper_db()
+    init_trade_db()
     s = get_paper_stats()
 
     print()

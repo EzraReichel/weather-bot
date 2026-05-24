@@ -33,12 +33,12 @@ from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from weatherbot.config import settings
-from weatherbot.models.database import init_db, SessionLocal, BotState
+from weatherbot.models.weather_db import init_db
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(docs_url=None, redoc_url=None)
 
-FRONTEND_DIR = Path(__file__).parent / "frontend"
+FRONTEND_DIR = Path(__file__).parent / "dashboard"
 
 
 @app.get("/health")
@@ -75,35 +75,10 @@ async def on_startup():
 
     init_db()
 
-    db = SessionLocal()
-    try:
-        state = db.query(BotState).first()
-        if not state:
-            state = BotState(
-                bankroll=settings.INITIAL_BANKROLL,
-                total_trades=0,
-                winning_trades=0,
-                total_pnl=0.0,
-                is_running=True,
-            )
-            db.add(state)
-            db.commit()
-            logger.info(f"New bot state — bankroll ${settings.INITIAL_BANKROLL:,.2f}")
-        else:
-            state.is_running = True
-            db.commit()
-            logger.info(
-                f"Loaded state — bankroll ${state.bankroll:,.2f}  "
-                f"P&L ${state.total_pnl:+,.2f}  trades {state.total_trades}"
-            )
-    finally:
-        db.close()
-
-    if settings.DRY_RUN:
+    if not settings.LIVE_TRADING:
         logger.info("=" * 60)
-        logger.info("🔒 DRY RUN MODE — no real trades will be placed")
+        logger.info("PAPER TRADING MODE — no real trades will be placed")
         logger.info("=" * 60)
-    logger.info(f"Simulation mode: {settings.SIMULATION_MODE}")
     logger.info(f"Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}  |  "
                 f"Kelly: {settings.KELLY_FRACTION:.0%}  |  "
                 f"Fee rate: {settings.KALSHI_FEE_RATE:.0%}  |  "
@@ -111,13 +86,13 @@ async def on_startup():
 
     try:
         from weatherbot.notifications.discord import send_startup_message
-        send_startup_message(settings.SIMULATION_MODE, settings.INITIAL_BANKROLL)
+        send_startup_message(not settings.LIVE_TRADING, settings.INITIAL_BANKROLL)
     except Exception as e:
         logger.warning(f"Discord startup ping failed: {e}")
 
-    from weatherbot.models.paper_trade import init_paper_db
-    init_paper_db()
-    logger.info("Paper trading DB initialized — paper_trades.db")
+    from weatherbot.models.trade import init_trade_db
+    init_trade_db()
+    logger.info("Trade DB initialized")
 
     from weatherbot.core.scheduler import start_scheduler
     start_scheduler()
@@ -128,15 +103,6 @@ async def on_startup():
 async def on_shutdown():
     from weatherbot.core.scheduler import stop_scheduler
     stop_scheduler()
-
-    db = SessionLocal()
-    try:
-        state = db.query(BotState).first()
-        if state:
-            state.is_running = False
-            db.commit()
-    finally:
-        db.close()
     logger.info("Shutdown complete.")
 
 

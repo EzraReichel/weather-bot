@@ -6,6 +6,8 @@ never places real trades, prints a final status report.
 import asyncio
 import sys
 import time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
 import traceback
 from datetime import date, timedelta
 
@@ -13,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from weatherbot.config import settings
-from weatherbot.models.database import init_db
+from weatherbot.models.weather_db import init_db
 
 # ── Results tracker ───────────────────────────────────────────────
 results = {
@@ -51,9 +53,9 @@ print("=" * 60)
 print("  🔒 DRY RUN MODE — no real trades will be placed")
 print("=" * 60)
 
-if not settings.DRY_RUN:
-    print("\n⚠️  WARNING: DRY_RUN=false in config — overriding to True for this script")
-    settings.DRY_RUN = True
+if settings.LIVE_TRADING:
+    print("\n⚠️  WARNING: LIVE_TRADING=true in config — overriding to False for this script")
+    settings.LIVE_TRADING = False
 
 
 # ── 2. Kalshi auth ────────────────────────────────────────────────
@@ -152,7 +154,7 @@ def test_discord():
         "color": 0x3498DB,
         "fields": [
             {"name": "Mode",     "value": "**DRY RUN**", "inline": True},
-            {"name": "DRY_RUN", "value": str(settings.DRY_RUN), "inline": True},
+            {"name": "LIVE_TRADING", "value": str(settings.LIVE_TRADING), "inline": True},
         ],
         "footer": {"text": "Kalshi Weather Arb Bot — dry_run.py"},
         "timestamp": datetime.now(timezone.utc).isoformat(),

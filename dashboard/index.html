@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kalshi Weather Arb — Mission Control</title>
+  <!-- React + ReactDOM (production) -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Babel standalone for in-browser JSX transpilation -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0a0c10; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    // Implement window.storage backed by localStorage
+    window.storage = {
+      get: function(key) {
+        return Promise.resolve({ value: localStorage.getItem(key) });
+      },
+      set: function(key, value) {
+        try { localStorage.setItem(key, value); } catch(e) {}
+        return Promise.resolve();
+      }
+    };
+  </script>
+
+  <!-- Load the JSX component and mount it -->
+  <script type="text/babel" src="/app.jsx" data-presets="react"></script>
+
+  <script type="text/babel" data-presets="react">
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(MissionControl));
+  </script>
+</body>
+</html>
