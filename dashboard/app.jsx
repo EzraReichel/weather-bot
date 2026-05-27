@@ -1,346 +1,244 @@
-const { useState, useEffect, useCallback, useRef } = React;
+const { useState, useEffect, useMemo, useRef } = React;
 
-const STORAGE_KEY = "mission-control-data";
+// ── Formatting helpers ────────────────────────────────────────────────────────
+const usd = (n, showSign = false) => {
+  if (typeof n !== "number") return "—";
+  const abs = Math.abs(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (showSign) return (n >= 0 ? "+" : "-") + "$" + abs;
+  return (n < 0 ? "-$" : "$") + abs;
+};
+const pct = (n) => (typeof n === "number" ? (n * 100).toFixed(1) + "%" : "—");
 
-// ── helpers ──────────────────────────────────────────────────────
-const fmt = (n) => (typeof n === "number" ? n.toFixed(2) : "–");
-const pct = (n) => (typeof n === "number" ? (n * 100).toFixed(1) + "%" : "–");
-const usd = (n) =>
-  typeof n === "number"
-    ? "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    : "–";
-const ts = () => new Date().toISOString().replace("T", " ").slice(0, 19);
-const uid = () => Math.random().toString(36).slice(2, 10);
+const CITY_SHORT = {
+  nyc: "NYC", chicago: "CHI", miami: "MIA", los_angeles: "LAX",
+  denver: "DEN", austin: "AUS", houston: "HOU", boston: "BOS",
+  washington_dc: "DC", phoenix: "PHX", seattle: "SEA",
+  san_francisco: "SFO", atlanta: "ATL", dallas: "DAL",
+  las_vegas: "LAS", minneapolis: "MSP", new_orleans: "NOLA",
+  oklahoma_city: "OKC", san_antonio: "SAT", philadelphia: "PHL",
+};
 
-const STATUS = { PENDING: "PENDING", WON: "WON", LOST: "LOST" };
-const SIDES = ["BUY YES", "BUY NO"];
-const CITIES = ["NYC", "CHI", "MIA", "LAX", "DEN"];
-const TYPES = ["KXHIGH", "KXLOW"];
+function tradeLabel(t) {
+  const city = CITY_SHORT[t.city] || t.city?.toUpperCase() || "?";
+  const metric = t.metric === "high" ? "High" : t.metric === "low" ? "Low" : t.metric === "rain" ? "Rain" : (t.metric || "?");
+  const dir = t.market_direction === "above" ? ">" : "<";
+  const thresh = t.threshold_f != null ? `${t.threshold_f}°F` : "";
+  const date = t.resolution_date ? fmtShortDate(t.resolution_date) : "";
+  if (t.metric === "rain") return `${city} Rain — ${date}`;
+  return `${city} ${metric} ${dir} ${thresh} — ${date}`;
+}
 
-// ── default state ────────────────────────────────────────────────
-const defaultState = () => ({
-  bankroll: 1000,
-  kellyFraction: 0.15,
-  feeRate: 0.07,
-  minEdge: 0.08,
-  bets: [],
-  signals: [],
-  log: [{ t: ts(), msg: "SYSTEM ONLINE ✓ Mission Control initialized" }],
-});
+function fmtShortDate(s) {
+  const d = new Date(s + "T12:00:00");
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
 
-// ── main app ─────────────────────────────────────────────────────
+function fmtDate(isoStr) {
+  if (!isoStr) return "—";
+  const d = new Date(isoStr);
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function getWeekStart(isoStr) {
+  const d = new Date(isoStr);
+  const day = d.getUTCDay(); // 0=Sun, 1=Mon
+  const diff = day === 0 ? -6 : 1 - day;
+  const mon = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + diff));
+  return mon.toISOString().slice(0, 10);
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+const api = {
+  get: (path) => fetch(path).then((r) => r.json()),
+  post: (path, body) =>
+    fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json()),
+};
+
+// ── App root ──────────────────────────────────────────────────────────────────
 function MissionControl() {
-  const [data, setData] = useState(null);
+  const [view, setView] = useState("trades");
+  const [trades, setTrades] = useState([]);
+  const [bankroll, setBankroll] = useState(null);
+  const [config, setConfig] = useState(null);
+  const [cities, setCities] = useState(null);
+  const [commits, setCommits] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState("dashboard");
-  const [showNewBet, setShowNewBet] = useState(false);
-  const [showNewSignal, setShowNewSignal] = useState(false);
-  const [clockTime, setClockTime] = useState(new Date());
-  const tickRef = useRef(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const result = await window.storage.get(STORAGE_KEY);
-        if (result && result.value) {
-          setData(JSON.parse(result.value));
-        } else {
-          setData(defaultState());
-        }
-      } catch {
-        setData(defaultState());
-      }
-      setLoading(false);
-    })();
+    Promise.all([
+      api.get("/api/trades").then((d) => setTrades(d.trades || [])),
+      api.get("/api/bankroll").then((d) => setBankroll(d)),
+      api.get("/api/config").then((d) => setConfig(d)),
+      api.get("/api/cities").then((d) => setCities(d)),
+      api.get("/api/git-commits").then((d) => setCommits(d.commits || [])),
+    ])
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (data && !loading) {
-      window.storage.set(STORAGE_KEY, JSON.stringify(data)).catch(() => {});
-    }
-  }, [data, loading]);
-
-  useEffect(() => {
-    tickRef.current = setInterval(() => setClockTime(new Date()), 1000);
-    return () => clearInterval(tickRef.current);
-  }, []);
-
-  const addLog = useCallback(
-    (msg) => setData((d) => ({ ...d, log: [{ t: ts(), msg }, ...d.log].slice(0, 100) })),
-    []
-  );
-
-  const addBet = useCallback(
-    (bet) => {
-      setData((d) => ({
-        ...d,
-        bets: [{ ...bet, id: uid(), status: STATUS.PENDING, createdAt: ts() }, ...d.bets],
-      }));
-      addLog(`BET PLACED → ${bet.ticker} ${bet.side} @ ${usd(bet.price)} × ${bet.contracts} contracts`);
-    },
-    [addLog]
-  );
-
-  const resolveBet = useCallback(
-    (id, result) => {
-      setData((d) => ({
-        ...d,
-        bets: d.bets.map((b) => (b.id === id ? { ...b, status: result, resolvedAt: ts() } : b)),
-      }));
-      addLog(`BET RESOLVED → ${id.slice(0, 6)} → ${result}`);
-    },
-    [addLog]
-  );
-
-  const addSignal = useCallback(
-    (signal) => {
-      setData((d) => ({
-        ...d,
-        signals: [{ ...signal, id: uid(), receivedAt: ts() }, ...d.signals].slice(0, 200),
-      }));
-      addLog(`SIGNAL RECEIVED → ${signal.ticker} edge ${pct(signal.edge)}`);
-    },
-    [addLog]
-  );
-
-  const updateConfig = useCallback(
-    (key, val) => {
-      setData((d) => ({ ...d, [key]: val }));
-      addLog(`CONFIG UPDATED → ${key} = ${val}`);
-    },
-    [addLog]
-  );
-
-  const resetAll = useCallback(() => {
-    setData(defaultState());
-  }, []);
-
-  if (loading || !data)
-    return (
-      <div style={styles.bootScreen}>
-        <div style={styles.bootText}>INITIALIZING SYSTEMS...</div>
-        <div style={styles.bootBar}>
-          <div style={styles.bootFill} />
-        </div>
-      </div>
-    );
-
-  const pending = data.bets.filter((b) => b.status === STATUS.PENDING);
-  const resolved = data.bets.filter((b) => b.status !== STATUS.PENDING);
-  const won = resolved.filter((b) => b.status === STATUS.WON);
-  const lost = resolved.filter((b) => b.status === STATUS.LOST);
-
-  const totalDeployed = pending.reduce((s, b) => s + b.price * b.contracts, 0);
-  const totalWon = won.reduce((s, b) => s + (1 - b.price) * b.contracts * (1 - data.feeRate), 0);
-  const totalLost = lost.reduce((s, b) => s + b.price * b.contracts, 0);
-  const pnl = totalWon - totalLost;
-  const winRate = resolved.length > 0 ? won.length / resolved.length : 0;
-  const avgEdge = data.bets.length > 0 ? data.bets.reduce((s, b) => s + (b.edge || 0), 0) / data.bets.length : 0;
-
-  const kellySize = (edge, prob) => {
-    if (!edge || !prob || prob <= 0 || prob >= 1) return 0;
-    const odds = (1 - data.feeRate) / prob - 1;
-    const kelly = (prob * odds - (1 - prob)) / odds;
-    return Math.max(0, Math.min(kelly * data.kellyFraction * data.bankroll, data.bankroll * 0.05));
+  const toggleCity = async (key) => {
+    const res = await api.post(`/api/cities/${key}/toggle`, {});
+    setCities((prev) => ({ ...prev, [key]: { ...prev[key], enabled: res.enabled } }));
   };
 
-  const clockStr = clockTime.toISOString().replace("T", "  ").slice(0, 21) + " UTC";
+  const saveConfig = async (updates) => {
+    const res = await api.post("/api/config", updates);
+    setConfig((prev) => ({ ...prev, ...updates }));
+    return res;
+  };
+
+  if (loading) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100vh", background: "#f8fafc" }}>
+        <div style={{ color: "#64748b", fontSize: 15 }}>Loading...</div>
+      </div>
+    );
+  }
+
+  const resolved = trades.filter((t) => t.resolved);
+  const wins = resolved.filter((t) => t.result === "win");
+  const totalPnl = resolved.reduce((s, t) => s + (t.pnl || 0), 0);
+  const winRate = resolved.length ? wins.length / resolved.length : null;
+  const current = bankroll?.current ?? config?.INITIAL_BANKROLL ?? 0;
+  const isLive = config?.LIVE_TRADING;
 
   return (
-    <div style={styles.root}>
-      <div style={styles.scanlines} />
-
-      <header style={styles.header}>
-        <div style={styles.headerLeft}>
-          <div style={styles.logo}>◈</div>
+    <div style={S.page}>
+      {/* Header */}
+      <header style={S.header}>
+        <div style={S.headerLeft}>
+          <div style={S.logoMark}>W</div>
           <div>
-            <div style={styles.title}>KALSHI WEATHER ARB</div>
-            <div style={styles.subtitle}>MISSION CONTROL v1.0</div>
+            <div style={S.appName}>Kalshi Weather Arb</div>
+            <div style={S.appSub}>Paper trading dashboard</div>
           </div>
         </div>
-        <div style={styles.clock}>{clockStr}</div>
-        <div style={styles.headerRight}>
-          <div style={{ ...styles.statusDot, background: pending.length > 0 ? "#0f0" : "#555" }} />
-          <span style={styles.statusText}>
-            {pending.length > 0 ? `${pending.length} ACTIVE` : "STANDBY"}
+
+        <div style={S.headerStats}>
+          <HeaderStat label="Bankroll" value={usd(current)} color={C.blue} />
+          <div style={S.statDivider} />
+          <HeaderStat label="All-time P&L" value={usd(totalPnl, true)} color={totalPnl >= 0 ? C.green : C.red} />
+          <div style={S.statDivider} />
+          <HeaderStat label="Win rate" value={winRate !== null ? pct(winRate) : "—"} color={winRate !== null && winRate >= 0.5 ? C.green : C.amber} />
+          <div style={S.statDivider} />
+          <HeaderStat label="Total trades" value={trades.length} color={C.text} />
+        </div>
+
+        <div style={S.headerRight}>
+          <span style={{ ...S.badge, ...(isLive ? { background: "#fef2f2", color: C.red, border: `1px solid ${C.red}33` } : { background: "#f0fdf4", color: C.green, border: `1px solid ${C.green}33` }) }}>
+            {isLive ? "Live" : "Paper"}
           </span>
         </div>
       </header>
 
-      <nav style={styles.nav}>
-        {["dashboard", "bets", "signals", "config"].map((v) => (
-          <button
-            key={v}
-            onClick={() => setView(v)}
-            style={{ ...styles.navBtn, ...(view === v ? styles.navActive : {}) }}
-          >
-            {v.toUpperCase()}
+      {/* Tabs */}
+      <div style={S.tabBar}>
+        {[["trades", "Trades"], ["bankroll", "Bankroll"], ["config", "Settings"]].map(([key, label]) => (
+          <button key={key} onClick={() => setView(key)} style={{ ...S.tab, ...(view === key ? S.tabActive : {}) }}>
+            {label}
           </button>
         ))}
-      </nav>
+      </div>
 
-      <main style={styles.main}>
-        {view === "dashboard" && (
-          <Dashboard
-            {...{ data, pending, resolved, won, lost, totalDeployed, totalWon, totalLost, pnl, winRate, avgEdge, kellySize, setShowNewBet, setShowNewSignal }}
-          />
-        )}
-        {view === "bets" && <BetsView bets={data.bets} resolveBet={resolveBet} setShowNewBet={setShowNewBet} />}
-        {view === "signals" && (
-          <SignalsView signals={data.signals} addBet={addBet} kellySize={kellySize} bankroll={data.bankroll} setShowNewSignal={setShowNewSignal} />
-        )}
-        {view === "config" && <ConfigView data={data} updateConfig={updateConfig} resetAll={resetAll} />}
+      {/* Content */}
+      <main style={S.main}>
+        {view === "trades" && <TradesView trades={trades} />}
+        {view === "bankroll" && <BankrollView bankroll={bankroll} trades={trades} config={config} commits={commits} />}
+        {view === "config" && <ConfigView config={config} cities={cities} saveConfig={saveConfig} toggleCity={toggleCity} />}
       </main>
-
-      <footer style={styles.footer}>
-        <span style={styles.footerLabel}>LOG ▸</span>
-        <div style={styles.footerScroll}>
-          {data.log.slice(0, 5).map((l, i) => (
-            <span key={i} style={styles.logEntry}>
-              <span style={styles.logTime}>{l.t.slice(11)}</span> {l.msg}
-              {i < 4 ? "  ·  " : ""}
-            </span>
-          ))}
-        </div>
-      </footer>
-
-      {showNewBet && <NewBetModal addBet={addBet} close={() => setShowNewBet(false)} kellySize={kellySize} bankroll={data.bankroll} />}
-      {showNewSignal && <NewSignalModal addSignal={addSignal} close={() => setShowNewSignal(false)} />}
     </div>
   );
 }
 
-function Dashboard({ data, pending, resolved, won, lost, totalDeployed, totalWon, totalLost, pnl, winRate, avgEdge, kellySize, setShowNewBet, setShowNewSignal }) {
-  const metrics = [
-    { label: "BANKROLL", value: usd(data.bankroll), color: "#0ff" },
-    { label: "DEPLOYED", value: usd(totalDeployed), color: "#ff0" },
-    { label: "P&L", value: usd(pnl), color: pnl >= 0 ? "#0f0" : "#f33" },
-    { label: "WIN RATE", value: pct(winRate), color: winRate >= 0.5 ? "#0f0" : "#f93" },
-    { label: "AVG EDGE", value: pct(avgEdge), color: "#0ff" },
-    { label: "ACTIVE BETS", value: pending.length, color: "#ff0" },
-  ];
-
-  const recentSignals = data.signals.slice(0, 5);
-  const recentBets = pending.slice(0, 5);
-
+function HeaderStat({ label, value, color }) {
   return (
-    <div style={styles.dashGrid}>
-      <div style={styles.metricsRow}>
-        {metrics.map((m, i) => (
-          <div key={i} style={{ ...styles.metricCard, animationDelay: `${i * 0.08}s` }}>
-            <div style={styles.metricLabel}>{m.label}</div>
-            <div style={{ ...styles.metricValue, color: m.color }}>{m.value}</div>
-          </div>
-        ))}
-      </div>
-
-      <div style={styles.dashCols}>
-        <div style={styles.panel}>
-          <div style={styles.panelHeader}>
-            <span>RECENT SIGNALS</span>
-            <button style={styles.smallBtn} onClick={() => setShowNewSignal(true)}>+ ADD</button>
-          </div>
-          {recentSignals.length === 0 ? (
-            <div style={styles.empty}>No signals yet — waiting for bot alerts</div>
-          ) : (
-            recentSignals.map((s) => (
-              <div key={s.id} style={styles.signalRow}>
-                <div style={styles.signalTicker}>{s.ticker}</div>
-                <div style={styles.signalDetail}>
-                  <span>Model: {pct(s.modelProb)}</span>
-                  <span>Mkt: {pct(s.marketPrice)}</span>
-                  <span style={{ color: s.edge >= 0.1 ? "#0f0" : "#ff0" }}>Edge: {pct(s.edge)}</span>
-                </div>
-                <div style={styles.signalSide}>{s.side}</div>
-              </div>
-            ))
-          )}
-        </div>
-
-        <div style={styles.panel}>
-          <div style={styles.panelHeader}>
-            <span>ACTIVE POSITIONS</span>
-            <button style={styles.smallBtn} onClick={() => setShowNewBet(true)}>+ BET</button>
-          </div>
-          {recentBets.length === 0 ? (
-            <div style={styles.empty}>No active bets</div>
-          ) : (
-            recentBets.map((b) => (
-              <div key={b.id} style={styles.betRow}>
-                <div>
-                  <div style={styles.betTicker}>{b.ticker}</div>
-                  <div style={styles.betDetail}>{b.side} @ {usd(b.price)} × {b.contracts}</div>
-                </div>
-                <div style={styles.betCost}>{usd(b.price * b.contracts)}</div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-
-      <div style={styles.panel}>
-        <div style={styles.panelHeader}>RESOLUTION HISTORY</div>
-        <div style={styles.historyRow}>
-          <div style={styles.histBox}>
-            <div style={{ ...styles.histNum, color: "#0f0" }}>{won.length}</div>
-            <div style={styles.histLabel}>WON</div>
-          </div>
-          <div style={styles.histBox}>
-            <div style={{ ...styles.histNum, color: "#f33" }}>{lost.length}</div>
-            <div style={styles.histLabel}>LOST</div>
-          </div>
-          <div style={styles.histBox}>
-            <div style={{ ...styles.histNum, color: "#0ff" }}>{resolved.length}</div>
-            <div style={styles.histLabel}>TOTAL</div>
-          </div>
-          <div style={styles.histBox}>
-            <div style={{ ...styles.histNum, color: pnl >= 0 ? "#0f0" : "#f33" }}>{usd(pnl)}</div>
-            <div style={styles.histLabel}>NET P&L</div>
-          </div>
-        </div>
-      </div>
+    <div style={{ textAlign: "center" }}>
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+      <div style={{ fontSize: 18, fontWeight: 700, color }}>{value}</div>
     </div>
   );
 }
 
-function BetsView({ bets, resolveBet, setShowNewBet }) {
+// ── Trades view ───────────────────────────────────────────────────────────────
+function TradesView({ trades }) {
+  const [search, setSearch] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return trades;
+    return trades.filter((t) => {
+      const label = tradeLabel(t).toLowerCase();
+      return (
+        label.includes(q) ||
+        (t.ticker || "").toLowerCase().includes(q) ||
+        (t.city || "").toLowerCase().includes(q) ||
+        (t.result || "").includes(q) ||
+        (t.side || "").includes(q)
+      );
+    });
+  }, [trades, search]);
+
+  const fResolved = filtered.filter((t) => t.resolved);
+  const fWins = fResolved.filter((t) => t.result === "win");
+  const fPnl = fResolved.reduce((s, t) => s + (t.pnl || 0), 0);
+
   return (
     <div>
-      <div style={styles.viewHeader}>
-        <span>ALL BETS ({bets.length})</span>
-        <button style={styles.actionBtn} onClick={() => setShowNewBet(true)}>+ NEW BET</button>
+      {/* Search + summary */}
+      <div style={S.searchRow}>
+        <div style={S.searchWrap}>
+          <svg style={S.searchIcon} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <circle cx="8.5" cy="8.5" r="5.5" /><path d="M15 15l-3-3" strokeLinecap="round" />
+          </svg>
+          <input
+            style={S.searchInput}
+            placeholder="Search by city, market, result..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          {search && (
+            <button style={S.clearBtn} onClick={() => setSearch("")}>✕</button>
+          )}
+        </div>
+        <div style={S.searchSummary}>
+          <span style={{ color: C.muted }}>{filtered.length} of {trades.length} trades</span>
+          {fResolved.length > 0 && (
+            <>
+              <span style={{ color: C.border, margin: "0 8px" }}>|</span>
+              <span style={{ color: C.green, fontWeight: 600 }}>{fWins.length}W</span>
+              <span style={{ color: C.muted, margin: "0 4px" }}>/</span>
+              <span style={{ color: C.red, fontWeight: 600 }}>{fResolved.length - fWins.length}L</span>
+              <span style={{ color: C.border, margin: "0 8px" }}>|</span>
+              <span style={{ color: fPnl >= 0 ? C.green : C.red, fontWeight: 600 }}>{usd(fPnl, true)}</span>
+            </>
+          )}
+        </div>
       </div>
-      <div style={styles.tableWrap}>
-        <table style={styles.table}>
+
+      {/* Table */}
+      <div style={S.card}>
+        <table style={S.table}>
           <thead>
-            <tr>
-              {["TICKER", "SIDE", "PRICE", "QTY", "COST", "EDGE", "STATUS", "ACTIONS"].map((h) => (
-                <th key={h} style={styles.th}>{h}</th>
-              ))}
+            <tr style={S.thead}>
+              <th style={S.th}>Market</th>
+              <th style={S.th}>Side</th>
+              <th style={S.th}>Edge</th>
+              <th style={S.th}>Model prob</th>
+              <th style={S.th}>Outcome</th>
+              <th style={S.th}>P&L</th>
+              <th style={S.th}>Date</th>
             </tr>
           </thead>
           <tbody>
-            {bets.map((b) => (
-              <tr key={b.id} style={styles.tr}>
-                <td style={styles.td}>{b.ticker}</td>
-                <td style={{ ...styles.td, color: b.side === "BUY YES" ? "#0f0" : "#f93" }}>{b.side}</td>
-                <td style={styles.td}>{usd(b.price)}</td>
-                <td style={styles.td}>{b.contracts}</td>
-                <td style={styles.td}>{usd(b.price * b.contracts)}</td>
-                <td style={styles.td}>{pct(b.edge)}</td>
-                <td style={{ ...styles.td, color: b.status === STATUS.WON ? "#0f0" : b.status === STATUS.LOST ? "#f33" : "#ff0" }}>
-                  {b.status}
-                </td>
-                <td style={styles.td}>
-                  {b.status === STATUS.PENDING && (
-                    <>
-                      <button style={styles.tinyBtn} onClick={() => resolveBet(b.id, STATUS.WON)}>WIN</button>
-                      <button style={{ ...styles.tinyBtn, borderColor: "#f33", color: "#f33" }} onClick={() => resolveBet(b.id, STATUS.LOST)}>LOSS</button>
-                    </>
-                  )}
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                  {trades.length === 0 ? "No trades placed yet." : "No trades match your search."}
                 </td>
               </tr>
-            ))}
+            ) : (
+              filtered.map((t) => <TradeRow key={`${t.is_paper ? "p" : "l"}_${t.id}`} trade={t} />)
+            )}
           </tbody>
         </table>
       </div>
@@ -348,330 +246,789 @@ function BetsView({ bets, resolveBet, setShowNewBet }) {
   );
 }
 
-function SignalsView({ signals, addBet, kellySize, bankroll, setShowNewSignal }) {
-  const actOn = (s) => {
-    const size = kellySize(s.edge, s.modelProb);
-    const contracts = Math.floor(size / s.marketPrice);
-    if (contracts < 1) return;
-    addBet({
-      ticker: s.ticker,
-      side: s.side,
-      price: s.marketPrice,
-      contracts,
-      edge: s.edge,
-      modelProb: s.modelProb,
-      signalId: s.id,
-    });
-  };
+function TradeRow({ trade: t }) {
+  const result = t.result;
+  const pnlColor = (t.pnl || 0) > 0 ? C.green : (t.pnl || 0) < 0 ? C.red : C.muted;
+
+  let outcomeChip;
+  if (result === "win") {
+    outcomeChip = <span style={{ ...S.chip, background: "#f0fdf4", color: C.green, border: `1px solid ${C.green}33` }}>Win</span>;
+  } else if (result === "loss") {
+    outcomeChip = <span style={{ ...S.chip, background: "#fef2f2", color: C.red, border: `1px solid ${C.red}33` }}>Loss</span>;
+  } else {
+    outcomeChip = <span style={{ ...S.chip, background: "#fffbeb", color: C.amber, border: `1px solid ${C.amber}33` }}>Pending</span>;
+  }
 
   return (
-    <div>
-      <div style={styles.viewHeader}>
-        <span>ALL SIGNALS ({signals.length})</span>
-        <button style={styles.actionBtn} onClick={() => setShowNewSignal(true)}>+ ADD SIGNAL</button>
-      </div>
-      <div style={styles.tableWrap}>
-        <table style={styles.table}>
-          <thead>
-            <tr>
-              {["TIME", "TICKER", "MODEL", "MARKET", "EDGE", "SIDE", "KELLY $", "ACTION"].map((h) => (
-                <th key={h} style={styles.th}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {signals.map((s) => {
-              const k = kellySize(s.edge, s.modelProb);
-              return (
-                <tr key={s.id} style={styles.tr}>
-                  <td style={styles.td}>{s.receivedAt?.slice(11) || "–"}</td>
-                  <td style={styles.td}>{s.ticker}</td>
-                  <td style={styles.td}>{pct(s.modelProb)}</td>
-                  <td style={styles.td}>{pct(s.marketPrice)}</td>
-                  <td style={{ ...styles.td, color: s.edge >= 0.1 ? "#0f0" : "#ff0" }}>{pct(s.edge)}</td>
-                  <td style={{ ...styles.td, color: s.side === "BUY YES" ? "#0f0" : "#f93" }}>{s.side}</td>
-                  <td style={styles.td}>{usd(k)}</td>
-                  <td style={styles.td}>
-                    <button style={styles.tinyBtn} onClick={() => actOn(s)}>BET</button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <tr style={S.tr}>
+      <td style={S.td}>
+        <div style={{ fontWeight: 500, color: C.text, fontSize: 13 }}>{tradeLabel(t)}</div>
+        <div style={{ fontSize: 11, color: C.subtle, marginTop: 1 }}>{t.ticker}</div>
+      </td>
+      <td style={S.td}>
+        <span style={{
+          fontWeight: 600, fontSize: 12,
+          color: t.side === "yes" ? C.green : C.amber,
+        }}>
+          {t.side?.toUpperCase() || "—"}
+        </span>
+      </td>
+      <td style={{ ...S.td, color: (t.edge || 0) >= 0.1 ? C.green : C.text }}>
+        {pct(t.edge)}
+      </td>
+      <td style={{ ...S.td, color: C.muted }}>{pct(t.model_prob)}</td>
+      <td style={S.td}>{outcomeChip}</td>
+      <td style={{ ...S.td, fontWeight: t.pnl != null ? 600 : 400, color: pnlColor }}>
+        {t.pnl != null ? usd(t.pnl, true) : "—"}
+      </td>
+      <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>{t.resolution_date || "—"}</td>
+    </tr>
   );
 }
 
-function ConfigView({ data, updateConfig, resetAll }) {
-  const fields = [
-    { key: "bankroll", label: "BANKROLL ($)", step: 100, min: 0 },
-    { key: "kellyFraction", label: "KELLY FRACTION", step: 0.01, min: 0.01, max: 1 },
-    { key: "feeRate", label: "KALSHI FEE RATE", step: 0.01, min: 0, max: 0.5 },
-    { key: "minEdge", label: "MIN EDGE THRESHOLD", step: 0.01, min: 0, max: 0.5 },
+// ── Bankroll view ─────────────────────────────────────────────────────────────
+function BankrollView({ bankroll, trades, config, commits }) {
+  const resolved = trades.filter((t) => t.resolved);
+  const wins = resolved.filter((t) => t.result === "win");
+  const losses = resolved.filter((t) => t.result === "loss");
+  const totalPnl = resolved.reduce((s, t) => s + (t.pnl || 0), 0);
+  const winRate = resolved.length ? wins.length / resolved.length : null;
+  const avgEdge = trades.length ? trades.reduce((s, t) => s + (t.edge || 0), 0) / trades.length : 0;
+  const initial = bankroll?.initial ?? config?.INITIAL_BANKROLL ?? 1000;
+  const current = bankroll?.current ?? initial;
+
+  const stats = [
+    { label: "Current bankroll", value: usd(current), color: C.blue, big: true },
+    { label: "All-time P&L", value: usd(totalPnl, true), color: totalPnl >= 0 ? C.green : C.red, big: true },
+    { label: "ROI", value: pct(totalPnl / initial), color: totalPnl >= 0 ? C.green : C.red },
+    { label: "Win rate", value: winRate !== null ? pct(winRate) : "—", color: winRate !== null && winRate >= 0.5 ? C.green : C.amber },
+    { label: "Wins", value: wins.length, color: C.green },
+    { label: "Losses", value: losses.length, color: C.red },
+    { label: "Total settled", value: resolved.length, color: C.text },
+    { label: "Avg edge", value: pct(avgEdge), color: C.blue },
   ];
 
   return (
-    <div style={styles.configGrid}>
-      <div style={styles.panel}>
-        <div style={styles.panelHeader}>PARAMETERS</div>
-        {fields.map((f) => (
-          <div key={f.key} style={styles.configRow}>
-            <label style={styles.configLabel}>{f.label}</label>
-            <input
-              type="number"
-              step={f.step}
-              min={f.min}
-              max={f.max}
-              value={data[f.key]}
-              onChange={(e) => updateConfig(f.key, parseFloat(e.target.value) || 0)}
-              style={styles.configInput}
-            />
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Stat grid */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+        {stats.map((s, i) => (
+          <div key={i} style={S.statCard}>
+            <div style={S.statLabel}>{s.label}</div>
+            <div style={{ ...S.statValue, color: s.color, fontSize: s.big ? 24 : 20 }}>{s.value}</div>
           </div>
         ))}
       </div>
-      <div style={styles.panel}>
-        <div style={styles.panelHeader}>KELLY CALCULATOR</div>
-        <KellyCalc bankroll={data.bankroll} kellyFraction={data.kellyFraction} feeRate={data.feeRate} />
+
+      {/* Chart */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>Bankroll over time</div>
+        <BankrollChart points={bankroll?.points || []} initial={initial} />
       </div>
-      <div style={styles.panel}>
-        <div style={styles.panelHeader}>SYSTEM</div>
-        <button style={{ ...styles.actionBtn, borderColor: "#f33", color: "#f33", marginTop: 12 }} onClick={() => { if (confirm("Reset all data? This cannot be undone.")) resetAll(); }}>
-          RESET ALL DATA
+
+      {/* Weekly P&L */}
+      <WeeklyPnlSection trades={trades} commits={commits} />
+
+      {/* Recent settlements */}
+      {resolved.length > 0 && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>Recent settlements</div>
+          <table style={S.table}>
+            <thead>
+              <tr style={S.thead}>
+                <th style={S.th}>Date settled</th>
+                <th style={S.th}>Market</th>
+                <th style={S.th}>Side</th>
+                <th style={S.th}>Edge</th>
+                <th style={S.th}>P&L</th>
+                <th style={S.th}>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {[...resolved].reverse().slice(0, 30).map((t) => {
+                const rc = t.result === "win" ? C.green : C.red;
+                return (
+                  <tr key={`${t.is_paper ? "p" : "l"}_${t.id}`} style={S.tr}>
+                    <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>{fmtDate(t.resolved_at)}</td>
+                    <td style={S.td}>{tradeLabel(t)}</td>
+                    <td style={{ ...S.td, color: t.side === "yes" ? C.green : C.amber, fontWeight: 600 }}>{t.side?.toUpperCase()}</td>
+                    <td style={{ ...S.td, color: (t.edge || 0) >= 0.1 ? C.green : C.text }}>{pct(t.edge)}</td>
+                    <td style={{ ...S.td, color: (t.pnl || 0) >= 0 ? C.green : C.red, fontWeight: 600 }}>{t.pnl != null ? usd(t.pnl, true) : "—"}</td>
+                    <td style={S.td}>
+                      <span style={{ color: rc, fontWeight: 600, fontSize: 12 }}>{t.result?.toUpperCase()}</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Weekly P&L section ────────────────────────────────────────────────────────
+function WeeklyPnlSection({ trades, commits }) {
+  const [selectedWeek, setSelectedWeek] = useState(null);
+
+  const weeks = useMemo(() => {
+    const resolved = trades.filter((t) => t.resolved && t.pnl != null && t.resolved_at);
+    const byWeek = {};
+    for (const t of resolved) {
+      const wk = getWeekStart(t.resolved_at);
+      if (!byWeek[wk]) byWeek[wk] = { week: wk, trades: [], pnl: 0, wins: 0, losses: 0 };
+      byWeek[wk].trades.push(t);
+      byWeek[wk].pnl += t.pnl;
+      if (t.result === "win") byWeek[wk].wins++;
+      else if (t.result === "loss") byWeek[wk].losses++;
+    }
+    return Object.values(byWeek).sort((a, b) => a.week.localeCompare(b.week));
+  }, [trades]);
+
+  const commitsByWeek = useMemo(() => {
+    const map = {};
+    for (const c of commits) {
+      const wk = getWeekStart(c.date + "T12:00:00Z");
+      if (!map[wk]) map[wk] = [];
+      map[wk].push(c);
+    }
+    return map;
+  }, [commits]);
+
+  const selectedWeekData = weeks.find((w) => w.week === selectedWeek) || null;
+  const selectedCommits = selectedWeek ? (commitsByWeek[selectedWeek] || []) : [];
+
+  return (
+    <div style={S.card}>
+      <div style={S.cardTitle}>Weekly P&L</div>
+      <WeeklyBarChart
+        weeks={weeks}
+        commitsByWeek={commitsByWeek}
+        selectedWeek={selectedWeek}
+        onSelectWeek={(wk) => setSelectedWeek(wk === selectedWeek ? null : wk)}
+      />
+      {selectedWeekData && (
+        <WeekDetail
+          weekData={selectedWeekData}
+          commits={selectedCommits}
+          onClose={() => setSelectedWeek(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function WeeklyBarChart({ weeks, commitsByWeek, selectedWeek, onSelectWeek }) {
+  const [tooltip, setTooltip] = useState(null);
+  const containerRef = useRef(null);
+
+  if (!weeks.length) {
+    return <div style={{ color: C.muted, fontSize: 14, padding: "32px 0", textAlign: "center" }}>No settled trades yet.</div>;
+  }
+
+  const W = 900, H = 260, PL = 52, PR = 24, PT = 40, PB = 36;
+  const innerW = W - PL - PR;
+  const innerH = H - PT - PB;
+  const zeroY = PT + innerH / 2;
+  const maxAbs = Math.max(...weeks.map((w) => Math.abs(w.pnl)), 0.01);
+  const n = weeks.length;
+  const slotW = innerW / n;
+  const barW = Math.max(8, Math.min(44, slotW - 6));
+  const cx = (i) => PL + (i + 0.5) * slotW;
+  const toBarH = (pnl) => (Math.abs(pnl) / maxAbs) * (innerH / 2);
+
+  const handleMouseMove = (e) => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const relX = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.floor((relX - PL) / slotW);
+    if (i >= 0 && i < n) {
+      setTooltip({ i, px: e.clientX - rect.left, py: e.clientY - rect.top });
+    } else {
+      setTooltip(null);
+    }
+  };
+
+  const hoveredWeek = tooltip != null ? weeks[tooltip.i] : null;
+
+  return (
+    <div ref={containerRef} style={{ position: "relative" }}
+      onMouseMove={handleMouseMove} onMouseLeave={() => setTooltip(null)}>
+      <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 260, display: "block", cursor: "pointer" }}>
+
+        {/* Commit track separator */}
+        <line x1={PL} y1={PT - 4} x2={W - PR} y2={PT - 4} stroke={C.border} strokeWidth="0.5" strokeDasharray="3 3" />
+        <text x={PL - 6} y="22" fill={C.subtle} fontSize="9" textAnchor="end" fontFamily={font}>deploys</text>
+
+        {/* Zero line */}
+        <line x1={PL} y1={zeroY} x2={W - PR} y2={zeroY} stroke={C.border} strokeWidth="1" />
+
+        {/* Y-axis labels */}
+        <text x={PL - 6} y={PT + 4} fill={C.subtle} fontSize="10" textAnchor="end" fontFamily={font}>{`+$${maxAbs.toFixed(0)}`}</text>
+        <text x={PL - 6} y={zeroY + 4} fill={C.subtle} fontSize="10" textAnchor="end" fontFamily={font}>$0</text>
+        <text x={PL - 6} y={PT + innerH + 4} fill={C.subtle} fontSize="10" textAnchor="end" fontFamily={font}>{`-$${maxAbs.toFixed(0)}`}</text>
+
+        {weeks.map((week, i) => {
+          const barH = Math.max(2, toBarH(week.pnl));
+          const bx = cx(i) - barW / 2;
+          const by = week.pnl >= 0 ? zeroY - barH : zeroY;
+          const color = week.pnl >= 0 ? C.green : C.red;
+          const isSelected = week.week === selectedWeek;
+          const isHovered = hoveredWeek?.week === week.week;
+          const wkCommits = commitsByWeek[week.week] || [];
+
+          return (
+            <g key={week.week} onClick={() => onSelectWeek(week.week)}>
+              {/* Bar */}
+              <rect x={bx.toFixed(1)} y={by.toFixed(1)} width={barW} height={barH.toFixed(1)}
+                fill={color} opacity={isSelected ? 1 : isHovered ? 0.85 : 0.6} rx="3" />
+              {/* Selected ring */}
+              {isSelected && (
+                <rect x={(bx - 1.5).toFixed(1)} y={(by - 1.5).toFixed(1)}
+                  width={barW + 3} height={barH + 3}
+                  fill="none" stroke={color} strokeWidth="1.5" rx="4" />
+              )}
+              {/* Commit dot */}
+              {wkCommits.length > 0 && (
+                <g>
+                  <circle cx={cx(i).toFixed(1)} cy="20" r="7" fill={C.blue} opacity="0.9" />
+                  <text x={cx(i).toFixed(1)} y="24" fill="white" fontSize={wkCommits.length > 9 ? "6" : "8"}
+                    textAnchor="middle" fontFamily={font} fontWeight="700">
+                    {wkCommits.length}
+                  </text>
+                </g>
+              )}
+              {/* Week label */}
+              {(n <= 14 || i % 2 === 0) && (
+                <text x={cx(i).toFixed(1)} y={H - 6} fill={isSelected ? C.text : C.subtle}
+                  fontSize="10" textAnchor="middle" fontFamily={font} fontWeight={isSelected ? "600" : "400"}>
+                  {fmtShortDate(week.week)}
+                </text>
+              )}
+            </g>
+          );
+        })}
+      </svg>
+
+      {/* Hover tooltip */}
+      {tooltip && hoveredWeek && (
+        <div style={{
+          position: "absolute",
+          left: Math.min(tooltip.px + 14, (containerRef.current?.offsetWidth || 999) - 170),
+          top: Math.max(8, tooltip.py - 88),
+          background: C.surface,
+          border: `1px solid ${C.border}`,
+          borderRadius: 10,
+          padding: "12px 16px",
+          fontSize: 13,
+          pointerEvents: "none",
+          boxShadow: "0 4px 20px rgba(0,0,0,0.1)",
+          zIndex: 10,
+          minWidth: 155,
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: 6, color: C.text }}>
+            Week of {fmtShortDate(hoveredWeek.week)}
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: hoveredWeek.pnl >= 0 ? C.green : C.red, marginBottom: 6 }}>
+            {usd(hoveredWeek.pnl, true)}
+          </div>
+          <div style={{ color: C.muted, marginBottom: 4 }}>
+            <span style={{ color: C.green, fontWeight: 600 }}>{hoveredWeek.wins}W</span>
+            {" / "}
+            <span style={{ color: C.red, fontWeight: 600 }}>{hoveredWeek.losses}L</span>
+            {" · "}{hoveredWeek.trades.length} trades
+          </div>
+          {(commitsByWeek[hoveredWeek.week] || []).length > 0 && (
+            <div style={{ color: C.blue, fontSize: 12 }}>
+              {(commitsByWeek[hoveredWeek.week] || []).length} deploy{(commitsByWeek[hoveredWeek.week] || []).length > 1 ? "s" : ""} this week
+            </div>
+          )}
+          <div style={{ color: C.subtle, fontSize: 11, marginTop: 6 }}>Click to see details</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function WeekDetail({ weekData, commits, onClose }) {
+  const weekEnd = new Date(weekData.week + "T00:00:00Z");
+  weekEnd.setUTCDate(weekEnd.getUTCDate() + 6);
+  const weekEndStr = weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+
+  return (
+    <div style={{ marginTop: 24, borderTop: `2px solid ${C.border}`, paddingTop: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+          <span style={{ fontWeight: 700, fontSize: 16 }}>
+            {fmtShortDate(weekData.week)} – {weekEndStr}
+          </span>
+          <span style={{ fontWeight: 700, fontSize: 18, color: weekData.pnl >= 0 ? C.green : C.red }}>
+            {usd(weekData.pnl, true)}
+          </span>
+          <span style={{ color: C.muted, fontSize: 13 }}>
+            {weekData.wins}W / {weekData.losses}L
+          </span>
+        </div>
+        <button onClick={onClose} style={{
+          background: "none", border: `1px solid ${C.border}`, borderRadius: 6,
+          padding: "5px 14px", cursor: "pointer", color: C.muted, fontSize: 13, fontFamily: font,
+        }}>
+          Close ✕
         </button>
       </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: commits.length ? "3fr 2fr" : "1fr", gap: 24, alignItems: "start" }}>
+        {/* Trades table */}
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+            Trades this week
+          </div>
+          <table style={S.table}>
+            <thead>
+              <tr style={S.thead}>
+                <th style={S.th}>Market</th>
+                <th style={S.th}>Side</th>
+                <th style={S.th}>Edge</th>
+                <th style={S.th}>P&L</th>
+                <th style={S.th}>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {weekData.trades.map((t) => (
+                <tr key={`${t.is_paper ? "p" : "l"}_${t.id}`} style={S.tr}>
+                  <td style={S.td}>{tradeLabel(t)}</td>
+                  <td style={{ ...S.td, color: t.side === "yes" ? C.green : C.amber, fontWeight: 600 }}>{t.side?.toUpperCase()}</td>
+                  <td style={{ ...S.td, color: (t.edge || 0) >= 0.1 ? C.green : C.text }}>{pct(t.edge)}</td>
+                  <td style={{ ...S.td, color: (t.pnl || 0) >= 0 ? C.green : C.red, fontWeight: 600 }}>
+                    {t.pnl != null ? usd(t.pnl, true) : "—"}
+                  </td>
+                  <td style={{ ...S.td, color: t.result === "win" ? C.green : C.red, fontWeight: 600, fontSize: 12 }}>
+                    {t.result?.toUpperCase()}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Commits */}
+        {commits.length > 0 && (
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 600, color: C.muted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 10 }}>
+              Deploys this week
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {commits.map((c) => (
+                <div key={c.hash} style={{
+                  padding: "10px 14px",
+                  background: "#f8fafc",
+                  border: `1px solid ${C.border}`,
+                  borderLeft: `3px solid ${C.blue}`,
+                  borderRadius: "0 8px 8px 0",
+                }}>
+                  <div style={{ fontWeight: 500, fontSize: 13, color: C.text, lineHeight: 1.4 }}>{c.message}</div>
+                  <div style={{ fontSize: 11, color: C.subtle, marginTop: 4 }}>
+                    <code style={{ background: "#e2e8f0", padding: "1px 5px", borderRadius: 3, fontSize: 10 }}>{c.hash}</code>
+                    {" · "}{fmtDate(c.date + "T12:00:00")}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-function KellyCalc({ bankroll, kellyFraction, feeRate }) {
-  const [prob, setProb] = useState(0.8);
-  const [market, setMarket] = useState(0.65);
-  const edge = prob - market;
-  const odds = (1 - feeRate) / market - 1;
-  const rawKelly = (prob * odds - (1 - prob)) / odds;
-  const fracKelly = rawKelly * kellyFraction;
-  const size = Math.max(0, Math.min(fracKelly * bankroll, bankroll * 0.05));
-  const contracts = Math.floor(size / market);
+function BankrollChart({ points, initial }) {
+  if (!points || points.length < 2) {
+    return (
+      <div style={{ padding: "48px 0", textAlign: "center", color: C.muted, fontSize: 14 }}>
+        No settled trades yet — chart will appear here once trades resolve.
+      </div>
+    );
+  }
+
+  const W = 900, H = 240, PL = 72, PR = 90, PT = 20, PB = 36;
+  const innerW = W - PL - PR;
+  const innerH = H - PT - PB;
+  const n = points.length;
+
+  const values = points.map((p) => p.bankroll);
+  const rawMin = Math.min(...values);
+  const rawMax = Math.max(...values);
+  const pad = (rawMax - rawMin) * 0.12 || 20;
+  const minVal = rawMin - pad;
+  const maxVal = rawMax + pad;
+  const valRange = maxVal - minVal;
+
+  const toX = (i) => PL + (i / (n - 1)) * innerW;
+  const toY = (v) => PT + (1 - (v - minVal) / valRange) * innerH;
+
+  const pts = points.map((p, i) => ({ x: toX(i), y: toY(p.bankroll) }));
+  const pathD = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+  const fillD = `${pathD} L${pts[n - 1].x.toFixed(1)},${(PT + innerH).toFixed(1)} L${pts[0].x.toFixed(1)},${(PT + innerH).toFixed(1)} Z`;
+
+  const current = points[n - 1].bankroll;
+  const lineColor = current >= initial ? C.green : C.red;
+  const fillColor = current >= initial ? "#16a34a" : "#dc2626";
+
+  // Y-axis labels
+  const yGrids = [0, 0.25, 0.5, 0.75, 1].map((frac) => ({
+    y: toY(minVal + valRange * frac),
+    label: "$" + (minVal + valRange * frac).toFixed(0),
+  }));
+
+  // Date range labels
+  const datePts = points.filter((p) => p.t);
+  const firstDate = datePts.length ? datePts[0].t.slice(0, 10) : "";
+  const lastDate = datePts.length ? datePts[datePts.length - 1].t.slice(0, 10) : "";
+  const currentY = toY(current);
 
   return (
-    <div>
-      <div style={styles.configRow}>
-        <label style={styles.configLabel}>MODEL PROB</label>
-        <input type="range" min={0.01} max={0.99} step={0.01} value={prob} onChange={(e) => setProb(+e.target.value)} style={{ flex: 1 }} />
-        <span style={styles.calcVal}>{pct(prob)}</span>
-      </div>
-      <div style={styles.configRow}>
-        <label style={styles.configLabel}>MARKET PRICE</label>
-        <input type="range" min={0.01} max={0.99} step={0.01} value={market} onChange={(e) => setMarket(+e.target.value)} style={{ flex: 1 }} />
-        <span style={styles.calcVal}>{pct(market)}</span>
-      </div>
-      <div style={styles.calcResults}>
-        <div style={styles.calcRow}><span>Edge</span><span style={{ color: edge > 0 ? "#0f0" : "#f33" }}>{pct(edge)}</span></div>
-        <div style={styles.calcRow}><span>Raw Kelly</span><span>{pct(rawKelly)}</span></div>
-        <div style={styles.calcRow}><span>Fractional Kelly</span><span>{pct(fracKelly)}</span></div>
-        <div style={styles.calcRow}><span>Position Size</span><span style={{ color: "#0ff" }}>{usd(size)}</span></div>
-        <div style={styles.calcRow}><span>Contracts</span><span style={{ color: "#ff0" }}>{contracts}</span></div>
-      </div>
-    </div>
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: 240, display: "block" }}>
+      <defs>
+        <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={fillColor} stopOpacity="0.15" />
+          <stop offset="100%" stopColor={fillColor} stopOpacity="0.02" />
+        </linearGradient>
+      </defs>
+
+      {/* Grid lines */}
+      {yGrids.map((g, i) => (
+        <g key={i}>
+          <line x1={PL} y1={g.y.toFixed(1)} x2={W - PR} y2={g.y.toFixed(1)} stroke="#e2e8f0" strokeWidth="1" />
+          <text x={PL - 8} y={+g.y.toFixed(1) + 4} fill={C.subtle} fontSize="10" textAnchor="end" fontFamily={font}>{g.label}</text>
+        </g>
+      ))}
+
+      {/* Zero line (initial bankroll) */}
+      {initial >= minVal && initial <= maxVal && (
+        <line x1={PL} y1={toY(initial).toFixed(1)} x2={W - PR} y2={toY(initial).toFixed(1)}
+          stroke={C.border} strokeWidth="1" strokeDasharray="4 3" />
+      )}
+
+      {/* Fill + line */}
+      <path d={fillD} fill="url(#chartFill)" />
+      <path d={pathD} fill="none" stroke={lineColor} strokeWidth="2" strokeLinejoin="round" />
+
+      {/* Dots (when sparse) */}
+      {n <= 60 && pts.slice(1).map((p, i) => (
+        <circle key={i} cx={p.x.toFixed(1)} cy={p.y.toFixed(1)} r="3" fill={lineColor} opacity="0.6" />
+      ))}
+
+      {/* Axes */}
+      <line x1={PL} y1={PT} x2={PL} y2={PT + innerH} stroke="#e2e8f0" strokeWidth="1" />
+      <line x1={PL} y1={PT + innerH} x2={W - PR} y2={PT + innerH} stroke="#e2e8f0" strokeWidth="1" />
+
+      {/* Current value callout */}
+      <line x1={(W - PR).toFixed(1)} y1={currentY.toFixed(1)} x2={(W - PR + 8).toFixed(1)} y2={currentY.toFixed(1)}
+        stroke={lineColor} strokeWidth="1.5" />
+      <text x={W - PR + 11} y={+currentY.toFixed(1) + 4} fill={lineColor} fontSize="11" fontFamily={font} fontWeight="700">
+        {usd(current)}
+      </text>
+
+      {/* Date labels */}
+      {firstDate && <text x={PL} y={H - 6} fill={C.subtle} fontSize="10" fontFamily={font}>{firstDate}</text>}
+      {lastDate && <text x={W - PR} y={H - 6} fill={C.subtle} fontSize="10" textAnchor="end" fontFamily={font}>{lastDate}</text>}
+    </svg>
   );
 }
 
-function NewBetModal({ addBet, close, kellySize, bankroll }) {
-  const [ticker, setTicker] = useState("");
-  const [side, setSide] = useState("BUY YES");
-  const [price, setPrice] = useState(0.5);
-  const [contracts, setContracts] = useState(10);
-  const [edge, setEdge] = useState(0.1);
-  const [modelProb, setModelProb] = useState(0.8);
+// ── Config / Switchboard ──────────────────────────────────────────────────────
+function ConfigView({ config, cities, saveConfig, toggleCity }) {
+  const [local, setLocal] = useState(config || {});
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [savedMsg, setSavedMsg] = useState("");
 
-  const submit = () => {
-    if (!ticker) return;
-    addBet({ ticker, side, price, contracts, edge, modelProb });
-    close();
+  const set = (key, val) => { setLocal((p) => ({ ...p, [key]: val })); setDirty(true); setSavedMsg(""); };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await saveConfig(local);
+      setDirty(false);
+      setSavedMsg("Saved — restart bot to apply changes");
+      setTimeout(() => setSavedMsg(""), 6000);
+    } catch (e) { alert("Save failed: " + e.message); }
+    finally { setSaving(false); }
   };
 
+  const ENV_FIELDS = [
+    { key: "LIVE_TRADING",             label: "Live trading mode",         type: "bool",   danger: true, help: "Enables real-money orders on Kalshi" },
+    { key: "INITIAL_BANKROLL",         label: "Initial bankroll ($)",       type: "number", step: 100, min: 0 },
+    { key: "KELLY_FRACTION",           label: "Kelly fraction",             type: "number", step: 0.01, min: 0.01, max: 1 },
+    { key: "MIN_EDGE_THRESHOLD",       label: "Min edge threshold",         type: "number", step: 0.01, min: 0, max: 0.5 },
+    { key: "KALSHI_FEE_RATE",          label: "Kalshi fee rate",            type: "number", step: 0.01, min: 0, max: 0.2 },
+    { key: "WEATHER_MAX_TRADE_SIZE",   label: "Max trade size ($)",         type: "number", step: 10, min: 0 },
+    { key: "LIVE_MAX_TRADE_SIZE",      label: "Live max trade size ($)",    type: "number", step: 1, min: 0 },
+    { key: "SCAN_INTERVAL_SECONDS",    label: "Scan interval (seconds)",    type: "number", step: 10, min: 10 },
+    { key: "TRADING_HOURS_START",      label: "Trading start hour (ET)",    type: "number", step: 1, min: 0, max: 23 },
+    { key: "TRADING_HOURS_END",        label: "Trading end hour (ET)",      type: "number", step: 1, min: 0, max: 23 },
+    { key: "MIN_ASK_SIZE",             label: "Min ask size",               type: "number", step: 5, min: 0 },
+    { key: "MIN_VOLUME_24H",           label: "Min 24h volume",             type: "number", step: 50, min: 0 },
+    { key: "WEATHER_MIN_ENTRY_PRICE",  label: "Min entry price",            type: "number", step: 0.01, min: 0, max: 1 },
+    { key: "WEATHER_MAX_ENTRY_PRICE",  label: "Max entry price",            type: "number", step: 0.01, min: 0, max: 1 },
+    { key: "CITY_OVERRIDE",            label: "City override (blank = all)",type: "text",   placeholder: "nyc" },
+  ];
+
+  const enabledCount = cities ? Object.values(cities).filter((c) => c.enabled).length : 0;
+  const totalCount = cities ? Object.keys(cities).length : 0;
+
   return (
-    <div style={styles.overlay} onClick={close}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.modalTitle}>NEW BET</div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>TICKER</label>
-          <input style={styles.formInput} value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="KXHIGHNY-26APR07-T75" />
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+
+      {/* Environment variables */}
+      <div style={S.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={S.cardTitle}>Bot settings</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {savedMsg && <span style={{ fontSize: 13, color: C.green }}>{savedMsg}</span>}
+            {dirty && (
+              <button style={{ ...S.btn, opacity: saving ? 0.6 : 1 }} onClick={handleSave} disabled={saving}>
+                {saving ? "Saving..." : "Save changes"}
+              </button>
+            )}
+          </div>
         </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>SIDE</label>
-          <select style={styles.formInput} value={side} onChange={(e) => setSide(e.target.value)}>
-            {SIDES.map((s) => <option key={s}>{s}</option>)}
-          </select>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0 48px" }}>
+          {ENV_FIELDS.map((f) => (
+            <div key={f.key} style={S.envRow}>
+              <div>
+                <div style={S.envLabel}>{f.label}</div>
+                {f.help && <div style={S.envHelp}>{f.help}</div>}
+              </div>
+
+              {f.type === "bool" ? (
+                <button
+                  style={{
+                    ...S.toggle,
+                    background: local[f.key] ? (f.danger ? C.red : C.green) : "#e2e8f0",
+                    color: local[f.key] ? "#fff" : C.muted,
+                  }}
+                  onClick={() => {
+                    if (f.danger && !local[f.key]) {
+                      if (!confirm("⚠ This enables REAL MONEY trading on Kalshi.\nAre you absolutely sure?")) return;
+                    }
+                    set(f.key, !local[f.key]);
+                  }}
+                >
+                  {local[f.key] ? "On" : "Off"}
+                </button>
+              ) : f.type === "text" ? (
+                <input style={S.envInput} value={local[f.key] || ""} placeholder={f.placeholder || ""} onChange={(e) => set(f.key, e.target.value)} />
+              ) : (
+                <input type="number" step={f.step} min={f.min} max={f.max} style={S.envInput}
+                  value={local[f.key] ?? ""} onChange={(e) => set(f.key, parseFloat(e.target.value) || 0)} />
+              )}
+            </div>
+          ))}
         </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>PRICE ($)</label>
-          <input type="number" step={0.01} min={0.01} max={0.99} style={styles.formInput} value={price} onChange={(e) => setPrice(+e.target.value)} />
+
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.border}`, fontSize: 12, color: C.subtle }}>
+          Changes are saved to .env — restart the bot process for them to take effect.
+          City toggles below apply immediately on the next scan.
         </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>CONTRACTS</label>
-          <input type="number" step={1} min={1} style={styles.formInput} value={contracts} onChange={(e) => setContracts(+e.target.value)} />
+      </div>
+
+      {/* City toggles */}
+      <div style={S.card}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={S.cardTitle}>Active cities</div>
+          <span style={{ fontSize: 13, color: C.muted }}>{enabledCount} of {totalCount} enabled</span>
         </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>EDGE</label>
-          <input type="number" step={0.01} style={styles.formInput} value={edge} onChange={(e) => setEdge(+e.target.value)} />
-        </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>MODEL PROB</label>
-          <input type="number" step={0.01} style={styles.formInput} value={modelProb} onChange={(e) => setModelProb(+e.target.value)} />
-        </div>
-        <div style={styles.modalCost}>TOTAL COST: {usd(price * contracts)}</div>
-        <div style={styles.modalActions}>
-          <button style={styles.actionBtn} onClick={submit}>CONFIRM BET</button>
-          <button style={{ ...styles.actionBtn, borderColor: "#555", color: "#888" }} onClick={close}>CANCEL</button>
-        </div>
+
+        {cities ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 8 }}>
+            {Object.entries(cities).map(([key, city]) => {
+              const on = city.enabled;
+              return (
+                <button key={key} onClick={() => toggleCity(key)} style={{
+                  textAlign: "left",
+                  padding: "10px 14px",
+                  border: `1px solid ${on ? C.green + "44" : C.border}`,
+                  borderRadius: 8,
+                  background: on ? "#f0fdf4" : "#fafafa",
+                  cursor: "pointer",
+                  transition: "all 0.15s",
+                  fontFamily: font,
+                }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: on ? C.text : C.muted }}>{city.name}</div>
+                  <div style={{ fontSize: 11, marginTop: 2, color: on ? C.green : C.subtle }}>
+                    {on ? "Active" : "Inactive"}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div style={{ color: C.muted }}>Loading...</div>
+        )}
       </div>
     </div>
   );
 }
 
-function NewSignalModal({ addSignal, close }) {
-  const [ticker, setTicker] = useState("");
-  const [modelProb, setModelProb] = useState(0.85);
-  const [marketPrice, setMarketPrice] = useState(0.65);
-  const [side, setSide] = useState("BUY YES");
-  const [confidence, setConfidence] = useState(0.8);
-  const edge = modelProb - marketPrice;
+// ── Design tokens ─────────────────────────────────────────────────────────────
+const font = "-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, sans-serif";
 
-  const submit = () => {
-    if (!ticker) return;
-    addSignal({ ticker, modelProb, marketPrice, side, confidence, edge });
-    close();
-  };
-
-  return (
-    <div style={styles.overlay} onClick={close}>
-      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
-        <div style={styles.modalTitle}>LOG SIGNAL</div>
-        <p style={styles.modalDesc}>Enter signal details from your Discord bot notification</p>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>TICKER</label>
-          <input style={styles.formInput} value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())} placeholder="KXHIGHNY-26APR07-T75" />
-        </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>MODEL PROBABILITY</label>
-          <input type="number" step={0.01} min={0} max={1} style={styles.formInput} value={modelProb} onChange={(e) => setModelProb(+e.target.value)} />
-        </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>MARKET PRICE</label>
-          <input type="number" step={0.01} min={0} max={1} style={styles.formInput} value={marketPrice} onChange={(e) => setMarketPrice(+e.target.value)} />
-        </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>SIDE</label>
-          <select style={styles.formInput} value={side} onChange={(e) => setSide(e.target.value)}>
-            {SIDES.map((s) => <option key={s}>{s}</option>)}
-          </select>
-        </div>
-        <div style={styles.formRow}>
-          <label style={styles.formLabel}>CONFIDENCE</label>
-          <input type="number" step={0.01} min={0} max={1} style={styles.formInput} value={confidence} onChange={(e) => setConfidence(+e.target.value)} />
-        </div>
-        <div style={{ ...styles.modalCost, color: edge >= 0.08 ? "#0f0" : "#f93" }}>
-          EDGE: {pct(edge)} {edge >= 0.08 ? "✓ ABOVE THRESHOLD" : "✗ BELOW THRESHOLD"}
-        </div>
-        <div style={styles.modalActions}>
-          <button style={styles.actionBtn} onClick={submit}>LOG SIGNAL</button>
-          <button style={{ ...styles.actionBtn, borderColor: "#555", color: "#888" }} onClick={close}>CANCEL</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const font = "'Share Tech Mono', 'Courier New', monospace";
-const styles = {
-  root: { fontFamily: font, background: "#0a0c10", color: "#c8d0d8", minHeight: "100vh", position: "relative", overflow: "hidden", fontSize: 13 },
-  scanlines: { position: "fixed", inset: 0, background: "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,255,200,0.015) 2px, rgba(0,255,200,0.015) 4px)", pointerEvents: "none", zIndex: 999 },
-  header: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 20px", borderBottom: "1px solid #1a2030", background: "linear-gradient(180deg, #0d1018 0%, #0a0c10 100%)" },
-  headerLeft: { display: "flex", alignItems: "center", gap: 12 },
-  logo: { fontSize: 28, color: "#0ff", textShadow: "0 0 12px rgba(0,255,255,0.5)", lineHeight: 1 },
-  title: { fontSize: 15, fontWeight: 700, color: "#fff", letterSpacing: 3, fontFamily: font },
-  subtitle: { fontSize: 10, color: "#556", letterSpacing: 2, fontFamily: font },
-  clock: { fontSize: 12, color: "#0ff", letterSpacing: 1.5, textShadow: "0 0 8px rgba(0,255,255,0.3)", fontFamily: font },
-  headerRight: { display: "flex", alignItems: "center", gap: 8 },
-  statusDot: { width: 8, height: 8, borderRadius: "50%", boxShadow: "0 0 6px currentColor" },
-  statusText: { fontSize: 11, letterSpacing: 1.5, fontFamily: font },
-  nav: { display: "flex", gap: 0, borderBottom: "1px solid #1a2030", background: "#0c0e14" },
-  navBtn: { fontFamily: font, fontSize: 11, letterSpacing: 2, padding: "10px 24px", background: "none", border: "none", borderBottom: "2px solid transparent", color: "#556", cursor: "pointer", transition: "all 0.2s" },
-  navActive: { color: "#0ff", borderBottomColor: "#0ff", textShadow: "0 0 8px rgba(0,255,255,0.3)" },
-  main: { padding: 20, minHeight: "calc(100vh - 140px)", overflow: "auto" },
-  footer: { position: "fixed", bottom: 0, left: 0, right: 0, display: "flex", alignItems: "center", gap: 12, padding: "6px 20px", background: "#0c0e14", borderTop: "1px solid #1a2030", overflow: "hidden", whiteSpace: "nowrap" },
-  footerLabel: { fontSize: 10, color: "#0ff", letterSpacing: 2, flexShrink: 0, fontFamily: font },
-  footerScroll: { fontSize: 10, color: "#445", overflow: "hidden", fontFamily: font },
-  logEntry: { fontFamily: font },
-  logTime: { color: "#335" },
-  dashGrid: { display: "flex", flexDirection: "column", gap: 16 },
-  metricsRow: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 },
-  metricCard: { background: "linear-gradient(135deg, #111420 0%, #0d1018 100%)", border: "1px solid #1a2030", borderRadius: 4, padding: "14px 16px", animation: "fadeSlideIn 0.4s ease both" },
-  metricLabel: { fontSize: 9, color: "#445", letterSpacing: 2, marginBottom: 6, fontFamily: font },
-  metricValue: { fontSize: 22, fontWeight: 700, fontFamily: font },
-  dashCols: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
-  panel: { background: "#0d1018", border: "1px solid #1a2030", borderRadius: 4, padding: 16 },
-  panelHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 11, color: "#0ff", letterSpacing: 2, marginBottom: 14, paddingBottom: 8, borderBottom: "1px solid #1a2030", fontFamily: font },
-  empty: { color: "#334", fontSize: 11, fontStyle: "italic", padding: "12px 0", fontFamily: font },
-  signalRow: { padding: "8px 0", borderBottom: "1px solid #111820" },
-  signalTicker: { fontSize: 12, color: "#fff", marginBottom: 4, fontFamily: font },
-  signalDetail: { display: "flex", gap: 16, fontSize: 10, color: "#667", fontFamily: font },
-  signalSide: { fontSize: 10, color: "#0ff", marginTop: 2, fontFamily: font },
-  betRow: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #111820" },
-  betTicker: { fontSize: 12, color: "#fff", fontFamily: font },
-  betDetail: { fontSize: 10, color: "#667", marginTop: 2, fontFamily: font },
-  betCost: { fontSize: 14, color: "#ff0", fontFamily: font },
-  historyRow: { display: "flex", justifyContent: "space-around", paddingTop: 8 },
-  histBox: { textAlign: "center" },
-  histNum: { fontSize: 28, fontWeight: 700, fontFamily: font },
-  histLabel: { fontSize: 9, color: "#445", letterSpacing: 2, marginTop: 4, fontFamily: font },
-  viewHeader: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, color: "#0ff", letterSpacing: 2, marginBottom: 16, fontFamily: font },
-  tableWrap: { overflowX: "auto" },
-  table: { width: "100%", borderCollapse: "collapse" },
-  th: { fontSize: 9, color: "#445", letterSpacing: 2, textAlign: "left", padding: "8px 10px", borderBottom: "1px solid #1a2030", fontFamily: font },
-  tr: { borderBottom: "1px solid #111820" },
-  td: { padding: "8px 10px", fontSize: 11, fontFamily: font },
-  smallBtn: { fontFamily: font, fontSize: 9, letterSpacing: 1, padding: "4px 10px", background: "none", border: "1px solid #0ff", color: "#0ff", borderRadius: 3, cursor: "pointer" },
-  actionBtn: { fontFamily: font, fontSize: 11, letterSpacing: 2, padding: "8px 20px", background: "none", border: "1px solid #0ff", color: "#0ff", borderRadius: 3, cursor: "pointer" },
-  tinyBtn: { fontFamily: font, fontSize: 9, padding: "3px 8px", background: "none", border: "1px solid #0ff", color: "#0ff", borderRadius: 2, cursor: "pointer", marginRight: 4 },
-  configGrid: { display: "flex", flexDirection: "column", gap: 16 },
-  configRow: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 },
-  configLabel: { fontSize: 10, color: "#556", letterSpacing: 1.5, width: 160, flexShrink: 0, fontFamily: font },
-  configInput: { fontFamily: font, fontSize: 13, background: "#111420", border: "1px solid #1a2030", color: "#fff", padding: "6px 10px", borderRadius: 3, width: 120 },
-  calcVal: { fontSize: 12, color: "#0ff", width: 50, textAlign: "right", fontFamily: font },
-  calcResults: { marginTop: 16, borderTop: "1px solid #1a2030", paddingTop: 12 },
-  calcRow: { display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 11, color: "#889", fontFamily: font },
-  overlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 },
-  modal: { background: "#0d1018", border: "1px solid #1a2030", borderRadius: 6, padding: 28, width: 400, maxWidth: "90vw", maxHeight: "90vh", overflow: "auto", boxShadow: "0 0 60px rgba(0,255,255,0.08)" },
-  modalTitle: { fontSize: 14, color: "#0ff", letterSpacing: 3, marginBottom: 6, fontFamily: font },
-  modalDesc: { fontSize: 10, color: "#556", marginBottom: 16, fontFamily: font },
-  formRow: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 12 },
-  formLabel: { fontSize: 9, color: "#556", letterSpacing: 1.5, fontFamily: font },
-  formInput: { fontFamily: font, fontSize: 13, background: "#111420", border: "1px solid #1a2030", color: "#fff", padding: "8px 10px", borderRadius: 3 },
-  modalCost: { fontSize: 14, color: "#ff0", textAlign: "center", padding: "12px 0", borderTop: "1px solid #1a2030", marginTop: 8, fontFamily: font },
-  modalActions: { display: "flex", gap: 12, marginTop: 16, justifyContent: "center" },
-  bootScreen: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100vh", background: "#0a0c10", fontFamily: font },
-  bootText: { fontSize: 12, color: "#0ff", letterSpacing: 4, marginBottom: 20 },
-  bootBar: { width: 200, height: 2, background: "#1a2030", borderRadius: 1, overflow: "hidden" },
-  bootFill: { width: "60%", height: "100%", background: "#0ff", animation: "bootPulse 1s ease infinite" },
+const C = {
+  bg: "#f1f5f9",
+  surface: "#ffffff",
+  border: "#e2e8f0",
+  text: "#0f172a",
+  muted: "#64748b",
+  subtle: "#94a3b8",
+  green: "#16a34a",
+  red: "#dc2626",
+  amber: "#d97706",
+  blue: "#2563eb",
 };
 
+const S = {
+  page: { fontFamily: font, background: C.bg, minHeight: "100vh", color: C.text, fontSize: 14 },
+
+  // Header
+  header: {
+    background: C.surface,
+    borderBottom: `1px solid ${C.border}`,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    padding: "14px 28px",
+    gap: 24,
+  },
+  headerLeft: { display: "flex", alignItems: "center", gap: 12, flexShrink: 0 },
+  logoMark: {
+    width: 36, height: 36, borderRadius: 8,
+    background: C.blue, color: "#fff",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontWeight: 800, fontSize: 18,
+  },
+  appName: { fontWeight: 700, fontSize: 16, color: C.text },
+  appSub: { fontSize: 11, color: C.muted, marginTop: 1 },
+  headerStats: { display: "flex", alignItems: "center", gap: 24, flex: 1, justifyContent: "center" },
+  statDivider: { width: 1, height: 32, background: C.border },
+  headerRight: { flexShrink: 0 },
+
+  // Tabs
+  tabBar: {
+    background: C.surface,
+    borderBottom: `1px solid ${C.border}`,
+    display: "flex",
+    padding: "0 28px",
+    gap: 0,
+  },
+  tab: {
+    fontFamily: font,
+    fontSize: 14,
+    padding: "12px 20px",
+    background: "none",
+    border: "none",
+    borderBottom: "2px solid transparent",
+    color: C.muted,
+    cursor: "pointer",
+    fontWeight: 500,
+    transition: "all 0.15s",
+  },
+  tabActive: { color: C.blue, borderBottomColor: C.blue },
+
+  // Main
+  main: { padding: "24px 28px", maxWidth: 1200, margin: "0 auto" },
+
+  // Cards
+  card: { background: C.surface, borderRadius: 10, border: `1px solid ${C.border}`, padding: 20, marginBottom: 0 },
+  cardTitle: { fontWeight: 600, fontSize: 15, marginBottom: 16, color: C.text },
+
+  // Stats
+  statCard: { background: C.surface, borderRadius: 10, border: `1px solid ${C.border}`, padding: "14px 18px" },
+  statLabel: { fontSize: 11, color: C.muted, marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.05em" },
+  statValue: { fontWeight: 700, fontSize: 20 },
+
+  // Search
+  searchRow: { display: "flex", alignItems: "center", gap: 16, marginBottom: 12 },
+  searchWrap: { position: "relative", display: "flex", alignItems: "center" },
+  searchIcon: { position: "absolute", left: 10, width: 16, height: 16, color: C.subtle, pointerEvents: "none" },
+  searchInput: {
+    fontFamily: font,
+    fontSize: 13,
+    background: C.surface,
+    border: `1px solid ${C.border}`,
+    borderRadius: 8,
+    color: C.text,
+    padding: "9px 36px 9px 34px",
+    width: 320,
+    outline: "none",
+  },
+  clearBtn: {
+    position: "absolute", right: 10,
+    background: "none", border: "none", color: C.subtle, cursor: "pointer",
+    fontSize: 12, padding: "2px 4px",
+  },
+  searchSummary: { display: "flex", alignItems: "center", fontSize: 13 },
+
+  // Table
+  table: { width: "100%", borderCollapse: "collapse" },
+  thead: { borderBottom: `1px solid ${C.border}` },
+  th: {
+    fontSize: 11, fontWeight: 600, color: C.muted,
+    textAlign: "left", padding: "10px 16px",
+    textTransform: "uppercase", letterSpacing: "0.05em",
+  },
+  tr: { borderBottom: `1px solid ${C.border}` },
+  td: { padding: "12px 16px", fontSize: 13 },
+
+  // Chip
+  chip: { display: "inline-block", padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 },
+
+  // Badge (header)
+  badge: { display: "inline-block", padding: "4px 10px", borderRadius: 20, fontSize: 12, fontWeight: 600 },
+
+  // Config
+  envRow: {
+    display: "flex", alignItems: "flex-start", justifyContent: "space-between",
+    gap: 16, padding: "12px 0", borderBottom: `1px solid ${C.border}`,
+  },
+  envLabel: { fontSize: 13, fontWeight: 500, color: C.text },
+  envHelp: { fontSize: 11, color: C.subtle, marginTop: 2 },
+  envInput: {
+    fontFamily: font, fontSize: 13,
+    background: "#f8fafc", border: `1px solid ${C.border}`,
+    borderRadius: 6, color: C.text,
+    padding: "6px 10px", width: 130, textAlign: "right", flexShrink: 0,
+    outline: "none",
+  },
+  toggle: {
+    fontFamily: font, fontSize: 12, fontWeight: 600,
+    padding: "5px 16px", border: "none", borderRadius: 20,
+    cursor: "pointer", flexShrink: 0, minWidth: 56, transition: "all 0.15s",
+  },
+  btn: {
+    fontFamily: font, fontSize: 13, fontWeight: 600,
+    padding: "8px 18px", background: C.blue, color: "#fff",
+    border: "none", borderRadius: 8, cursor: "pointer",
+  },
+};
+
+// ── CSS ───────────────────────────────────────────────────────────────────────
 if (typeof document !== "undefined") {
-  const styleEl = document.createElement("style");
-  styleEl.textContent = `
-    @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
-    @keyframes fadeSlideIn { from { opacity:0; transform:translateY(8px) } to { opacity:1; transform:translateY(0) } }
-    @keyframes bootPulse { 0%,100% { opacity:0.4 } 50% { opacity:1 } }
+  const el = document.createElement("style");
+  el.textContent = `
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    ::-webkit-scrollbar { width: 4px; height: 4px; }
-    ::-webkit-scrollbar-track { background: #0a0c10; }
-    ::-webkit-scrollbar-thumb { background: #1a2030; border-radius: 2px; }
-    input[type=range] { accent-color: #0ff; }
-    select option { background: #111420; color: #fff; }
-    button:hover { opacity: 0.8; }
+    body { background: #f1f5f9; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    input[type=number] { -moz-appearance: textfield; }
+    input[type=number]::-webkit-inner-spin-button { opacity: 0.3; }
+    input:focus { border-color: #2563eb !important; outline: none; }
+    button:hover { opacity: 0.85; }
+    tr:hover td { background: #f8fafc; }
   `;
-  document.head.appendChild(styleEl);
+  document.head.appendChild(el);
 }
