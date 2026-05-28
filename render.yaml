@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: weather-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: weather-bot-db
+          property: connectionString
+
+      # Kalshi API — fill in during Blueprint apply
+      - key: KALSHI_API_KEY_ID
+        sync: false
+      # Paste the full PEM string (replace newlines with \n or use Render's multiline input)
+      - key: KALSHI_PRIVATE_KEY_PEM
+        sync: false
+
+      # Discord
+      - key: DISCORD_WEBHOOK_URL
+        sync: false
+
+      # Bot tuning — edit these to match your current .env
+      - key: INITIAL_BANKROLL
+        value: "1000.0"
+      - key: KELLY_FRACTION
+        value: "0.15"
+      - key: SCAN_INTERVAL_SECONDS
+        value: "30"
+      - key: MIN_EDGE_THRESHOLD
+        value: "0.08"
+      - key: KALSHI_FEE_RATE
+        value: "0.07"
+      - key: WEATHER_MAX_TRADE_SIZE
+        value: "100.0"
+      - key: LIVE_MAX_TRADE_SIZE
+        value: "5.0"
+      - key: LIVE_TRADING
+        value: "false"
+
+      # Point at Kalshi prod when ready; default is demo
+      - key: KALSHI_API_BASE_URL
+        value: "https://demo-api.kalshi.co/trade-api/v2"
+
+databases:
+  - name: weather-bot-db
+    databaseName: weatherbot
+    plan: free
