@@ -44,9 +44,6 @@ services:
       - key: KALSHI_API_BASE_URL
         value: "https://demo-api.kalshi.co/trade-api/v2"
 
-      # Pin Python version so scipy can use a pre-built wheel
-      - key: PYTHON_VERSION
-        value: "3.12.9"
 
 databases:
   - name: weather-bot-db
