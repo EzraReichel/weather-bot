@@ -58,6 +58,7 @@ const api = {
 function MissionControl() {
   const [view, setView] = useState("trades");
   const [trades, setTrades] = useState([]);
+  const [paperTrades, setPaperTrades] = useState([]);
   const [bankroll, setBankroll] = useState(null);
   const [config, setConfig] = useState(null);
   const [cities, setCities] = useState(null);
@@ -67,6 +68,7 @@ function MissionControl() {
   useEffect(() => {
     Promise.all([
       api.get("/api/trades").then((d) => setTrades(d.trades || [])),
+      api.get("/api/paper-trades").then((d) => setPaperTrades(d.trades || [])),
       api.get("/api/bankroll").then((d) => setBankroll(d)),
       api.get("/api/config").then((d) => setConfig(d)),
       api.get("/api/cities").then((d) => setCities(d)),
@@ -110,7 +112,7 @@ function MissionControl() {
           <div style={S.logoMark}>W</div>
           <div>
             <div style={S.appName}>Kalshi Weather Arb</div>
-            <div style={S.appSub}>Paper trading dashboard</div>
+            <div style={S.appSub}>Mission Control</div>
           </div>
         </div>
 
@@ -124,11 +126,13 @@ function MissionControl() {
           <HeaderStat label="Total trades" value={trades.length} color={C.text} />
         </div>
 
-        <div style={S.headerRight}>
-          <span style={{ ...S.badge, ...(isLive ? { background: "#fef2f2", color: C.red, border: `1px solid ${C.red}33` } : { background: "#f0fdf4", color: C.green, border: `1px solid ${C.green}33` }) }}>
-            {isLive ? "Live" : "Paper"}
-          </span>
-        </div>
+        {isLive && (
+          <div style={S.headerRight}>
+            <span style={{ ...S.badge, background: "#fef2f2", color: C.red, border: `1px solid ${C.red}33` }}>
+              Live
+            </span>
+          </div>
+        )}
       </header>
 
       {/* Tabs */}
@@ -144,6 +148,7 @@ function MissionControl() {
       <main style={S.main}>
         {view === "trades" && <TradesView trades={trades} />}
         {view === "bankroll" && <BankrollView bankroll={bankroll} trades={trades} config={config} commits={commits} />}
+        {view === "paper-trades" && <PaperTradesView trades={paperTrades} />}
         {view === "config" && <ConfigView config={config} cities={cities} saveConfig={saveConfig} toggleCity={toggleCity} />}
       </main>
     </div>
@@ -283,6 +288,54 @@ function TradeRow({ trade: t }) {
       </td>
       <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>{t.resolution_date || "—"}</td>
     </tr>
+  );
+}
+
+// ── Paper Trades view ─────────────────────────────────────────────────────────
+function PaperTradesView({ trades }) {
+  const resolved = trades.filter((t) => t.resolved);
+  const wins = resolved.filter((t) => t.result === "win");
+  const totalPnl = resolved.reduce((s, t) => s + (t.pnl || 0), 0);
+
+  return (
+    <div>
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 24 }}>
+        <div style={{ fontSize: 13, color: C.muted }}>{trades.length} paper trades — {resolved.length} settled</div>
+        {resolved.length > 0 && (
+          <>
+            <span style={{ color: C.green, fontWeight: 600 }}>{wins.length}W</span>
+            <span style={{ color: C.muted }}>/ {resolved.length - wins.length}L</span>
+            <span style={{ color: totalPnl >= 0 ? C.green : C.red, fontWeight: 600 }}>{usd(totalPnl, true)}</span>
+          </>
+        )}
+      </div>
+      <div style={S.card}>
+        <table style={S.table}>
+          <thead>
+            <tr style={S.thead}>
+              <th style={S.th}>Market</th>
+              <th style={S.th}>Side</th>
+              <th style={S.th}>Edge</th>
+              <th style={S.th}>Model prob</th>
+              <th style={S.th}>Outcome</th>
+              <th style={S.th}>P&L</th>
+              <th style={S.th}>Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            {trades.length === 0 ? (
+              <tr>
+                <td colSpan={7} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                  No paper trades found.
+                </td>
+              </tr>
+            ) : (
+              trades.map((t) => <TradeRow key={`p_${t.id}`} trade={t} />)
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
