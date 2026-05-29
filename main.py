@@ -194,6 +194,27 @@ async def api_bankroll():
         db.close()
 
 
+@app.get("/api/debug/balance")
+async def api_debug_balance():
+    """Diagnose live balance fetch — shows raw API response or error."""
+    from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
+    try:
+        data = await KalshiClient().get_balance()
+        return {
+            "credentials_present": True,
+            "api_base_url": settings.KALSHI_API_BASE_URL,
+            "result": data,
+            "error": None,
+        }
+    except Exception as e:
+        return {
+            "credentials_present": kalshi_credentials_present(),
+            "api_base_url": settings.KALSHI_API_BASE_URL,
+            "result": None,
+            "error": str(e),
+        }
+
+
 @app.get("/api/config")
 async def api_config():
     return {
