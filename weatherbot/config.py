@@ -33,11 +33,6 @@ class Settings(BaseSettings):
     MIN_ASK_SIZE: int = 25
     MIN_VOLUME_24H: int = 200
 
-    # Trading hours gate (US/Eastern) — paper trades and Discord alerts only
-    # fire inside this window. Scanning still runs outside hours for data.
-    TRADING_HOURS_START: int = 10   # 10:00 AM ET (inclusive)
-    TRADING_HOURS_END: int = 18     # 6:00 PM ET (exclusive)
-
     # Live trading — default FALSE so paper trading requires explicit opt-in to go live
     LIVE_TRADING: bool = False
     KALSHI_API_BASE_URL: str = "https://api.elections.kalshi.com/trade-api/v2"

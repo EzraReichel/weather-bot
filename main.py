@@ -206,8 +206,6 @@ async def api_config():
         "KALSHI_FEE_RATE": settings.KALSHI_FEE_RATE,
         "WEATHER_MAX_TRADE_SIZE": settings.WEATHER_MAX_TRADE_SIZE,
         "LIVE_MAX_TRADE_SIZE": settings.LIVE_MAX_TRADE_SIZE,
-        "TRADING_HOURS_START": settings.TRADING_HOURS_START,
-        "TRADING_HOURS_END": settings.TRADING_HOURS_END,
         "MIN_ASK_SIZE": settings.MIN_ASK_SIZE,
         "MIN_VOLUME_24H": settings.MIN_VOLUME_24H,
         "WEATHER_MIN_ENTRY_PRICE": settings.WEATHER_MIN_ENTRY_PRICE,
