@@ -136,6 +136,9 @@ function MissionControl() {
           <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, textAlign: "right", letterSpacing: "0.01em" }}>
             Quattro Reichel
           </div>
+          <div style={{ fontSize: 10, color: C.subtle, textAlign: "right", marginTop: 2 }}>
+            Rolan Reichel did a little tiny bit of work to get this done
+          </div>
         </div>
       </header>
 
