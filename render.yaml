@@ -41,7 +41,7 @@ services:
         value: "false"
 
       - key: KALSHI_API_BASE_URL
-        value: "https://trading-api.kalshi.com/trade-api/v2"
+        value: "https://trading-api.kalshi.com/v1"
 
 
 databases:
