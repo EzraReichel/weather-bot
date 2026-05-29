@@ -168,3 +168,20 @@ def kalshi_credentials_present() -> bool:
     has_key = bool(settings.KALSHI_API_KEY_ID)
     has_pem = bool(settings.KALSHI_PRIVATE_KEY_PEM or settings.KALSHI_PRIVATE_KEY_PATH)
     return has_key and has_pem
+
+
+async def fetch_live_balance() -> float:
+    """
+    Return the live Kalshi account balance in dollars.
+    Falls back to settings.INITIAL_BANKROLL if credentials are missing or the API fails.
+    """
+    if not kalshi_credentials_present():
+        return settings.INITIAL_BANKROLL
+    try:
+        data = await KalshiClient().get_balance()
+        if "balance_dollars" in data:
+            return float(data["balance_dollars"])
+        return data.get("balance", 0) / 100.0
+    except Exception as e:
+        logger.warning(f"fetch_live_balance failed, using INITIAL_BANKROLL: {e}")
+        return settings.INITIAL_BANKROLL

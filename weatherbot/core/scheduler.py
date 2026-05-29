@@ -16,6 +16,7 @@ from weatherbot.core.paper_trading import get_paper_stats
 from weatherbot.core.trade_manager import execute_signal, settle_trades
 from weatherbot.core.trading import get_live_stats
 from weatherbot.core.weather_signals import scan_for_weather_signals
+from weatherbot.data.kalshi_client import fetch_live_balance
 from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade
 from weatherbot.models.weather_db import SessionLocal, Signal
 from weatherbot.notifications.discord import (
@@ -109,7 +110,8 @@ async def weather_scan_job():
 async def discord_command_poll_job():
     """Poll Discord channel every 60s for 'report' commands."""
     try:
-        poll_discord_commands()
+        bankroll = await fetch_live_balance()
+        poll_discord_commands(bankroll=bankroll)
     except Exception as e:
         logger.error(f"Discord command poll error: {e}", exc_info=True)
 
@@ -127,9 +129,7 @@ async def settlement_job():
                 f"Trades settled: {len(settled)} ({wins}W/{losses}L/{cancelled} cancelled)  "
                 f"P&L ${pnl:+.2f}"
             )
-            paper_stats = get_paper_stats()
-            live_stats  = get_live_stats()
-            bankroll = settings.INITIAL_BANKROLL + paper_stats["total_pnl"] + live_stats["total_pnl"]
+            bankroll = await fetch_live_balance()
             for t in settled:
                 try:
                     send_trade_settled_alert(t, bankroll=bankroll)
@@ -199,6 +199,7 @@ async def daily_summary_job():
         finally:
             paper_db.close()
 
+        bankroll = await fetch_live_balance()
         send_daily_summary(
             unique_signals=unique_tickers,
             actionable_signals=actionable_tickers,
@@ -209,6 +210,7 @@ async def daily_summary_job():
             scan_report=_latest_scan_report,
             daily_brier=daily_brier,
             live_stats=get_live_stats(),
+            bankroll=bankroll,
         )
 
     except Exception as e:

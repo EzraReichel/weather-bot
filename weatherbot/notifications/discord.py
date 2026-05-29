@@ -98,6 +98,7 @@ def send_daily_summary(
     scan_report=None,
     daily_brier: Optional[float] = None,
     live_stats: Optional[dict] = None,
+    bankroll: Optional[float] = None,
 ) -> bool:
     """Send combined end-of-day summary to Discord at 11 PM ET."""
     if not settings.DISCORD_WEBHOOK_URL:
@@ -108,7 +109,8 @@ def send_daily_summary(
     running_pnl = paper_stats.get("total_pnl", 0.0) + live_pnl
     running_sign = "+" if running_pnl >= 0 else ""
     color = COLOR_GREEN if running_pnl >= 0 else COLOR_RED
-    bankroll = settings.INITIAL_BANKROLL + running_pnl
+    if bankroll is None:
+        bankroll = settings.INITIAL_BANKROLL + running_pnl
 
     wins = paper_stats.get("wins", 0)
     losses = paper_stats.get("losses", 0)
@@ -306,7 +308,7 @@ def send_paper_trade_alert(signal, trade) -> bool:
 
 
 
-def send_paper_report() -> bool:
+def send_paper_report(bankroll: Optional[float] = None) -> bool:
     """Post a full paper trading report to Discord on demand."""
     if not settings.DISCORD_WEBHOOK_URL:
         return False
@@ -327,7 +329,8 @@ def send_paper_report() -> bool:
 
     pnl_sign    = "+" if pnl >= 0 else ""
     color       = COLOR_GREEN if pnl >= 0 else COLOR_RED
-    bankroll    = settings.INITIAL_BANKROLL + pnl
+    if bankroll is None:
+        bankroll = settings.INITIAL_BANKROLL + pnl
     win_rate    = f"{wins/(resolved)*100:.0f}%" if resolved > 0 else "n/a"
     brier_str   = f"{brier:.4f}" if brier is not None else "n/a"
 
@@ -416,7 +419,7 @@ def send_paper_report() -> bool:
     return success
 
 
-def poll_discord_commands() -> bool:
+def poll_discord_commands(bankroll: Optional[float] = None) -> bool:
     """
     Poll the Discord channel for messages containing 'report' (case-insensitive).
     Posts a full paper report for each matching message, then acknowledges via reaction.
@@ -470,7 +473,7 @@ def poll_discord_commands() -> bool:
                 continue
 
             # Post the report
-            send_paper_report()
+            send_paper_report(bankroll=bankroll)
 
             # Add ✅ reaction to mark as handled
             requests.put(

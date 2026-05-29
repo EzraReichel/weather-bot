@@ -162,9 +162,13 @@ async def api_paper_trades(limit: int = 5000):
 
 @app.get("/api/bankroll")
 async def api_bankroll():
-    """Bankroll computed from live trades only."""
+    """Bankroll — current value from live Kalshi account, history from settled trades."""
+    from weatherbot.data.kalshi_client import fetch_live_balance
     from weatherbot.models.weather_db import SessionLocal, engine
     from sqlalchemy import text, inspect as sa_inspect
+
+    live_balance = await fetch_live_balance()
+
     db = SessionLocal()
     try:
         has_paper = "paper_trades" in sa_inspect(engine).get_table_names()
@@ -185,7 +189,7 @@ async def api_bankroll():
                     "result": t["result"],
                     "ticker": t["ticker"],
                 })
-        return {"points": points, "current": round(cumulative, 2), "initial": initial}
+        return {"points": points, "current": round(live_balance, 2), "initial": initial}
     finally:
         db.close()
 
@@ -296,8 +300,10 @@ async def on_startup():
                 f"Scan: {settings.SCAN_INTERVAL_SECONDS}s")
 
     try:
+        from weatherbot.data.kalshi_client import fetch_live_balance
         from weatherbot.notifications.discord import send_startup_message
-        send_startup_message(not settings.LIVE_TRADING, settings.INITIAL_BANKROLL)
+        startup_balance = asyncio.run(fetch_live_balance())
+        send_startup_message(not settings.LIVE_TRADING, startup_balance)
     except Exception as e:
         logger.warning(f"Discord startup ping failed: {e}")
 
