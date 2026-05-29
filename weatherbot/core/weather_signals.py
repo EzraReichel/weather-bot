@@ -87,16 +87,17 @@ class WeatherTradingSignal:
         return abs(self.edge) >= edge_threshold
 
 
-async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTradingSignal]:
+async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional[float] = None) -> Optional[WeatherTradingSignal]:
     """
     Generate a trading signal using ensemble-of-ensembles probability model.
 
     Fetches GFS, ECMWF, GEM, and NWS forecasts in parallel. Falls back
     gracefully to single-source GFS if multi-source fetch fails.
     """
+    bankroll = live_bankroll if live_bankroll is not None else settings.INITIAL_BANKROLL
     # ── Rain markets: use precipitation probability directly ──────────────────
     if market.metric == "rain":
-        return await _generate_rain_signal(market)
+        return await _generate_rain_signal(market, bankroll)
 
     # ── Try multi-source first ────────────────────────────────────────────────
     multi_result: Optional[MultiSourceResult] = None
@@ -401,7 +402,7 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         model_prob=sizing_prob,
         market_price=market_yes_prob,
         direction=direction,
-        bankroll=settings.INITIAL_BANKROLL,
+        bankroll=bankroll,
         kelly_fraction=settings.KELLY_FRACTION,
         fee_rate=settings.KALSHI_FEE_RATE,
     )
@@ -442,7 +443,7 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
         edge=edge,
         direction=direction,
         confidence=confidence,
-        kelly_fraction=suggested_size / settings.INITIAL_BANKROLL if settings.INITIAL_BANKROLL > 0 else 0,
+        kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
         suggested_size=suggested_size,
         reasoning=reasoning,
         ensemble_mean=ensemble_mean,
@@ -461,9 +462,11 @@ async def generate_weather_signal(market: WeatherMarket) -> Optional[WeatherTrad
     )
 
 
-async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradingSignal]:
+async def _generate_rain_signal(market: WeatherMarket, live_bankroll: Optional[float] = None) -> Optional[WeatherTradingSignal]:
     """Generate signal for binary rain markets using GFS precipitation probability."""
     from weatherbot.data.multi_source_weather import fetch_rain_probability
+
+    bankroll = live_bankroll if live_bankroll is not None else settings.INITIAL_BANKROLL
 
     rain_prob = await fetch_rain_probability(market.city_key, market.target_date)
     if rain_prob is None:
@@ -493,7 +496,7 @@ async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradin
         model_prob=rain_sizing_prob,
         market_price=market_yes_prob,
         direction=direction,
-        bankroll=settings.INITIAL_BANKROLL,
+        bankroll=bankroll,
         kelly_fraction=settings.KELLY_FRACTION,
         fee_rate=settings.KALSHI_FEE_RATE,
     )
@@ -512,7 +515,7 @@ async def _generate_rain_signal(market: WeatherMarket) -> Optional[WeatherTradin
         edge=edge,
         direction=direction,
         confidence=0.6,
-        kelly_fraction=suggested_size / settings.INITIAL_BANKROLL if settings.INITIAL_BANKROLL > 0 else 0,
+        kelly_fraction=suggested_size / bankroll if bankroll > 0 else 0,
         suggested_size=suggested_size,
         reasoning=reasoning,
         ensemble_mean=rain_prob * 100,
@@ -552,6 +555,24 @@ async def scan_for_weather_signals() -> ScanReport:
     logger.info("=" * 60)
     logger.info("WEATHER SCAN: Fetching Kalshi temperature markets...")
 
+    # ── Fetch live Kalshi balance for Kelly sizing ────────────────────────────
+    # Use the actual account balance as the bankroll so Kelly bets track real
+    # equity, not a stale env var. Falls back to INITIAL_BANKROLL if the API
+    # is unreachable.
+    live_bankroll = settings.INITIAL_BANKROLL
+    if kalshi_credentials_present():
+        try:
+            from weatherbot.data.kalshi_client import KalshiClient
+            _client = KalshiClient()
+            balance_data = await _client.get_balance()
+            if "balance_dollars" in balance_data:
+                live_bankroll = float(balance_data["balance_dollars"])
+            else:
+                live_bankroll = balance_data.get("balance", 0) / 100.0
+            logger.info(f"Live Kalshi balance: ${live_bankroll:.2f} (INITIAL_BANKROLL env: ${settings.INITIAL_BANKROLL:.2f})")
+        except Exception as e:
+            logger.warning(f"Could not fetch live Kalshi balance, falling back to INITIAL_BANKROLL: {e}")
+
     fetch_report = MarketFetchReport()
     if not kalshi_credentials_present():
         logger.warning("Kalshi credentials not configured — skipping market fetch")
@@ -568,7 +589,7 @@ async def scan_for_weather_signals() -> ScanReport:
     signals: List[WeatherTradingSignal] = []
     for market in markets:
         try:
-            signal = await generate_weather_signal(market)
+            signal = await generate_weather_signal(market, live_bankroll=live_bankroll)
             if signal:
                 signals.append(signal)
         except Exception as e:
@@ -583,17 +604,16 @@ async def scan_for_weather_signals() -> ScanReport:
     # diversification, it multiplies the same correlated risk.
     signals = _dedup_correlated(signals)
 
-    # ── Resize using live available bankroll ──────────────────────────────────
-    # Kelly was computed with the static INITIAL_BANKROLL. Subtract capital
-    # already committed to open (unresolved) paper trades so we never size
-    # as if we have more money than we actually do.
-    available = _available_bankroll()
-    if available < settings.INITIAL_BANKROLL:
-        ratio = available / settings.INITIAL_BANKROLL
+    # ── Resize for capital committed to open (unresolved) trades ─────────────
+    # Kelly was computed with live_bankroll. Subtract capital already locked in
+    # open trades so we never size as if that equity is free to deploy.
+    available = _available_bankroll(live_bankroll)
+    if available < live_bankroll:
+        ratio = available / live_bankroll
         for s in signals:
             s.suggested_size = round(s.suggested_size * ratio, 2)
         logger.info(
-            f"Bankroll scaling: {available:.2f}/{settings.INITIAL_BANKROLL:.2f} available "
+            f"Bankroll scaling: ${available:.2f}/${live_bankroll:.2f} available "
             f"→ sizing multiplied by {ratio:.2f}"
         )
 
@@ -661,10 +681,10 @@ def _dedup_correlated(signals: List[WeatherTradingSignal]) -> List[WeatherTradin
     return kept
 
 
-def _available_bankroll() -> float:
+def _available_bankroll(live_bankroll: float) -> float:
     """
-    Return bankroll minus capital currently locked in open trades (paper and live).
-    Falls back to INITIAL_BANKROLL if the DB is unreachable.
+    Return live_bankroll minus capital currently locked in open trades (paper and live).
+    Falls back to live_bankroll unchanged if the DB is unreachable.
     """
     try:
         from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade as TradeModel
@@ -672,13 +692,13 @@ def _available_bankroll() -> float:
         try:
             open_trades = db.query(TradeModel).filter(TradeModel.resolved == False).all()
             committed = sum(t.kelly_size for t in open_trades if t.kelly_size)
-            available = max(0.0, settings.INITIAL_BANKROLL - committed)
+            available = max(0.0, live_bankroll - committed)
             return available
         finally:
             db.close()
     except Exception as e:
         logger.debug(f"Could not compute available bankroll: {e}")
-        return settings.INITIAL_BANKROLL
+        return live_bankroll
 
 
 def _persist_signals(signals: List[WeatherTradingSignal]):
