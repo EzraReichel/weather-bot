@@ -13,6 +13,13 @@ logger = logging.getLogger("weatherbot")
 
 # ── Place a live order ────────────────────────────────────────────────────────
 
+_WEATHER_PREFIXES = ("KXHIGH", "KXLOW", "KXRAIN")
+
+
+def _is_weather_ticker(ticker: str) -> bool:
+    return any(ticker.upper().startswith(p) for p in _WEATHER_PREFIXES)
+
+
 async def log_live_trade(signal) -> Optional[Trade]:
     """
     Place a real Kalshi order and record it as a live Trade (is_paper=False).
@@ -21,6 +28,15 @@ async def log_live_trade(signal) -> Optional[Trade]:
     init_trade_db()
 
     market = signal.market
+
+    # Hard guardrail: only ever trade weather markets
+    if not _is_weather_ticker(market.market_id):
+        logger.error(
+            f"NON-WEATHER TICKER BLOCKED: {market.market_id} — "
+            f"only KXHIGH/KXLOW/KXRAIN markets are allowed"
+        )
+        return None
+
     entry_price = market.yes_price if signal.direction == "yes" else market.no_price
     if entry_price <= 0:
         return None
