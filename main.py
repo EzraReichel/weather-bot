@@ -197,19 +197,39 @@ async def api_bankroll():
 @app.get("/api/debug/balance")
 async def api_debug_balance():
     """Diagnose live balance fetch — shows raw API response or error."""
+    from urllib.parse import urlparse
     from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
+    client = KalshiClient()
+    path_prefix = urlparse(settings.KALSHI_API_BASE_URL).path
+    signed_message_shape = f"{{timestamp}}GET{path_prefix}/portfolio/balance"
+    key_id = settings.KALSHI_API_KEY_ID or ""
+
+    key_load_error = None
+    key_type = None
     try:
-        data = await KalshiClient().get_balance()
+        k = client._load_private_key()
+        key_type = type(k).__name__
+    except Exception as e:
+        key_load_error = str(e)
+
+    try:
+        data = await client.get_balance()
         return {
-            "credentials_present": True,
             "api_base_url": settings.KALSHI_API_BASE_URL,
+            "signed_message_shape": signed_message_shape,
+            "key_id_prefix": key_id[:8] + "...",
+            "key_type": key_type,
+            "key_load_error": key_load_error,
             "result": data,
             "error": None,
         }
     except Exception as e:
         return {
-            "credentials_present": kalshi_credentials_present(),
             "api_base_url": settings.KALSHI_API_BASE_URL,
+            "signed_message_shape": signed_message_shape,
+            "key_id_prefix": key_id[:8] + "...",
+            "key_type": key_type,
+            "key_load_error": key_load_error,
             "result": None,
             "error": str(e),
         }
