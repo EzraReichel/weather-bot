@@ -8,6 +8,7 @@ const usd = (n, showSign = false) => {
   return (n < 0 ? "-$" : "$") + abs;
 };
 const pct = (n) => (typeof n === "number" ? (n * 100).toFixed(1) + "%" : "—");
+const edgeDisplay = (t) => t.side === "no" ? Math.abs(t.edge || 0) : (t.edge || 0);
 
 const CITY_SHORT = {
   nyc: "NYC", chicago: "CHI", miami: "MIA", los_angeles: "LAX",
@@ -155,11 +156,12 @@ function MissionControl() {
   );
 }
 
-function HeaderStat({ label, value, color }) {
+function HeaderStat({ label, value, color, warn }) {
   return (
     <div style={{ textAlign: "center" }}>
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 700, color }}>{value}</div>
+      {warn && <div style={{ fontSize: 10, color: C.amber, marginTop: 2, maxWidth: 160 }}>{warn}</div>}
     </div>
   );
 }
@@ -227,6 +229,7 @@ function TradesView({ trades }) {
             <tr style={S.thead}>
               <th style={S.th}>Market</th>
               <th style={S.th}>Side</th>
+              <th style={S.th}>Size</th>
               <th style={S.th}>Edge</th>
               <th style={S.th}>Model prob</th>
               <th style={S.th}>Outcome</th>
@@ -237,7 +240,7 @@ function TradesView({ trades }) {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                <td colSpan={8} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
                   {trades.length === 0 ? "No trades placed yet." : "No trades match your search."}
                 </td>
               </tr>
@@ -278,8 +281,13 @@ function TradeRow({ trade: t }) {
           {t.side?.toUpperCase() || "—"}
         </span>
       </td>
-      <td style={{ ...S.td, color: (t.edge || 0) >= 0.1 ? C.green : C.text }}>
-        {pct(t.edge)}
+      <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>
+        {t.contracts != null && t.entry_price != null
+          ? <>{usd(t.contracts * t.entry_price)}<span style={{ color: C.subtle }}> &times;{t.contracts}</span></>
+          : "—"}
+      </td>
+      <td style={{ ...S.td, color: edgeDisplay(t) >= 0.1 ? C.green : C.text }}>
+        {pct(edgeDisplay(t))}
       </td>
       <td style={{ ...S.td, color: C.muted }}>{pct(t.model_prob)}</td>
       <td style={S.td}>{outcomeChip}</td>
@@ -315,6 +323,7 @@ function PaperTradesView({ trades }) {
             <tr style={S.thead}>
               <th style={S.th}>Market</th>
               <th style={S.th}>Side</th>
+              <th style={S.th}>Size</th>
               <th style={S.th}>Edge</th>
               <th style={S.th}>Model prob</th>
               <th style={S.th}>Outcome</th>
@@ -325,7 +334,7 @@ function PaperTradesView({ trades }) {
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td colSpan={7} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                <td colSpan={8} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
                   No paper trades found.
                 </td>
               </tr>
@@ -405,7 +414,7 @@ function BankrollView({ bankroll, trades, config, commits }) {
                     <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>{fmtDate(t.resolved_at)}</td>
                     <td style={S.td}>{tradeLabel(t)}</td>
                     <td style={{ ...S.td, color: t.side === "yes" ? C.green : C.amber, fontWeight: 600 }}>{t.side?.toUpperCase()}</td>
-                    <td style={{ ...S.td, color: (t.edge || 0) >= 0.1 ? C.green : C.text }}>{pct(t.edge)}</td>
+                    <td style={{ ...S.td, color: edgeDisplay(t) >= 0.1 ? C.green : C.text }}>{pct(edgeDisplay(t))}</td>
                     <td style={{ ...S.td, color: (t.pnl || 0) >= 0 ? C.green : C.red, fontWeight: 600 }}>{t.pnl != null ? usd(t.pnl, true) : "—"}</td>
                     <td style={S.td}>
                       <span style={{ color: rc, fontWeight: 600, fontSize: 12 }}>{t.result?.toUpperCase()}</span>
@@ -812,7 +821,6 @@ function ConfigView({ config, cities, saveConfig, toggleCity }) {
 
   const ENV_FIELDS = [
     { key: "LIVE_TRADING",             label: "Live trading mode",         type: "bool",   danger: true, help: "Enables real-money orders on Kalshi" },
-    { key: "INITIAL_BANKROLL",         label: "Initial bankroll ($)",       type: "number", step: 100, min: 0 },
     { key: "KELLY_FRACTION",           label: "Kelly fraction",             type: "number", step: 0.01, min: 0.01, max: 1 },
     { key: "MIN_EDGE_THRESHOLD",       label: "Min edge threshold",         type: "number", step: 0.01, min: 0, max: 0.5 },
     { key: "KALSHI_FEE_RATE",          label: "Kalshi fee rate",            type: "number", step: 0.01, min: 0, max: 0.2 },
