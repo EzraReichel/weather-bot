@@ -27,7 +27,7 @@ async def log_live_trade(signal) -> Optional[Trade]:
 
     capped_size = min(signal.suggested_size, settings.LIVE_MAX_TRADE_SIZE)
     contracts = max(1, int(capped_size / entry_price))
-    yes_price_cents = round(entry_price * 100)
+    yes_price_cents = round(market.yes_price * 100)  # always YES-side price per Kalshi API
 
     db = SessionLocal()
     try:
@@ -41,7 +41,42 @@ async def log_live_trade(signal) -> Optional[Trade]:
             return None
 
         from weatherbot.data.kalshi_client import KalshiClient
+        from weatherbot.notifications.discord import send_live_order_failed_alert
         client = KalshiClient()
+
+        # ── Balance preflight ─────────────────────────────────────────────
+        # Guard 1: local — if capped_size can't cover even 1 contract, skip.
+        # Guard 2: API — confirm Kalshi balance covers the order cost.
+        if capped_size < entry_price:
+            reason = (
+                f"Sized out: Kelly size ${capped_size:.2f} < "
+                f"1-contract cost ${entry_price:.2f} for {market.market_id}"
+            )
+            logger.warning(f"LIVE ORDER SKIPPED — {reason}")
+            send_live_order_failed_alert(market.market_id, reason)
+            return None
+
+        order_cost = round(contracts * entry_price, 2)
+        try:
+            balance_data = await client.get_balance()
+            # Kalshi returns `balance` in cents; `balance_dollars` is the string equivalent
+            if "balance_dollars" in balance_data:
+                available_dollars = float(balance_data["balance_dollars"])
+            else:
+                available_dollars = balance_data.get("balance", 0) / 100.0
+            if available_dollars < order_cost:
+                reason = (
+                    f"Insufficient funds: ${available_dollars:.2f} available, "
+                    f"${order_cost:.2f} required ({contracts} contracts @ {entry_price:.2%})"
+                )
+                logger.error(f"LIVE ORDER SKIPPED {market.market_id} — {reason}")
+                send_live_order_failed_alert(market.market_id, reason)
+                return None
+        except Exception as balance_err:
+            logger.warning(
+                f"Balance preflight check failed for {market.market_id}: {balance_err} "
+                f"— proceeding with order attempt"
+            )
 
         logger.info(
             f"LIVE ORDER: {market.market_id}  {signal.direction.upper()}  "
@@ -98,6 +133,11 @@ async def log_live_trade(signal) -> Optional[Trade]:
     except Exception as e:
         logger.error(f"Live order failed for {market.market_id}: {e}", exc_info=True)
         db.rollback()
+        try:
+            from weatherbot.notifications.discord import send_live_order_failed_alert
+            send_live_order_failed_alert(market.market_id, f"Order error: {e}")
+        except Exception:
+            pass
         return None
     finally:
         db.close()
@@ -122,7 +162,7 @@ async def settle_live_trades() -> List[Trade]:
         pending = db.query(Trade).filter(
             Trade.is_paper == False,
             Trade.resolved == False,
-            Trade.resolution_date < today.isoformat(),
+            Trade.resolution_date <= today.isoformat(),
         ).all()
 
         if not pending:

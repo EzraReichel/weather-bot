@@ -37,90 +37,6 @@ def _post_embed(embed: dict) -> bool:
         return False
 
 
-def send_signal_alert(signal) -> bool:
-    """
-    Send a Discord alert for an actionable weather signal.
-
-    Args:
-        signal: WeatherTradingSignal instance
-    """
-    if not settings.DISCORD_WEBHOOK_URL:
-        return False
-
-    market = signal.market
-    color = COLOR_YELLOW if signal.low_confidence_flag else COLOR_GREEN
-
-    # Kelly size rounded to nearest dollar
-    kelly_amount = f"${signal.suggested_size:.0f}"
-
-    # Side label
-    side = signal.direction.upper()
-
-    # Confidence label
-    conf_pct = f"{signal.confidence:.0%}"
-    low_conf_note = "  ⚠️ Low Confidence (CDF vs fraction disagree)" if signal.low_confidence_flag else ""
-
-    # Per-source probability breakdown
-    sp = getattr(signal, "source_probs", {})
-    agreement = getattr(signal, "agreement", "MEDIUM")
-    outlier = getattr(signal, "outlier_dampened", None)
-    agreement_icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(agreement, "🟡")
-
-    source_parts = []
-    for name in ["gfs", "ecmwf", "gem", "nws"]:
-        if name in sp:
-            tag = " ⚡dampened" if name == outlier else ""
-            source_parts.append(f"{name.upper()}: {sp[name]:.0%}{tag}")
-    source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
-    if outlier:
-        source_breakdown += f"\n*{outlier.upper()} weight halved (outlier >40% from others)*"
-
-    fields = [
-        {"name": "Ticker",        "value": f"`{market.market_id}`",           "inline": True},
-        {"name": "Side",          "value": f"**{side}**",                      "inline": True},
-        {"name": "Edge",          "value": f"**{signal.edge:+.1%}**",          "inline": True},
-        {"name": "Combined Prob", "value": f"{signal.model_probability:.1%}",  "inline": True},
-        {"name": "Market Price",  "value": f"{signal.market_probability:.1%}", "inline": True},
-        {"name": "Kelly Size",    "value": kelly_amount,                       "inline": True},
-        {
-            "name": "Model Breakdown",
-            "value": source_breakdown,
-            "inline": False,
-        },
-        {
-            "name": "Agreement",
-            "value": f"{agreement_icon} **{agreement}**" + low_conf_note,
-            "inline": True,
-        },
-        {"name": "Confidence", "value": conf_pct, "inline": True},
-        {
-            "name": "Forecast (GFS ref)",
-            "value": (
-                f"Mean: {signal.ensemble_mean:.1f}°F  |  "
-                f"Std: {signal.ensemble_std:.1f}°F  |  "
-                f"Members: {signal.ensemble_members}"
-            ),
-            "inline": False,
-        },
-    ]
-
-    embed = {
-        "title": f"🌡️ {market.title}",
-        "description": (
-            f"{market.city_name} — {market.metric.upper()} temp "
-            f"**{market.direction}** {market.threshold_f:.0f}°F on {market.target_date}"
-        ),
-        "color": color,
-        "fields": fields,
-        "footer": {"text": "Kalshi Weather Arb Bot"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-    success = _post_embed(embed)
-    if success:
-        logger.info(f"Discord alert sent: {market.market_id} {side} edge={signal.edge:+.1%}")
-    return success
-
 
 def _build_filter_report_text(scan_report) -> str:
     """Build a compact filter breakdown string from a ScanReport."""
@@ -181,13 +97,15 @@ def send_daily_summary(
     paper_stats: dict,
     scan_report=None,
     daily_brier: Optional[float] = None,
+    live_stats: Optional[dict] = None,
 ) -> bool:
     """Send combined end-of-day summary to Discord at 11 PM ET."""
     if not settings.DISCORD_WEBHOOK_URL:
         return False
 
     pnl_sign = "+" if daily_paper_pnl >= 0 else ""
-    running_pnl = paper_stats.get("total_pnl", 0.0)
+    live_pnl = (live_stats or {}).get("total_pnl", 0.0)
+    running_pnl = paper_stats.get("total_pnl", 0.0) + live_pnl
     running_sign = "+" if running_pnl >= 0 else ""
     color = COLOR_GREEN if running_pnl >= 0 else COLOR_RED
     bankroll = settings.INITIAL_BANKROLL + running_pnl
@@ -263,14 +181,16 @@ def send_daily_summary(
 
 
 def send_trade_settled_alert(trade, bankroll: Optional[float] = None) -> bool:
-    """Send a Discord alert when a paper trade resolves (win or loss)."""
+    """Send a Discord alert when a trade resolves (win or loss)."""
     if not settings.DISCORD_WEBHOOK_URL:
         return False
 
     icon = "✅" if trade.result == "win" else "❌"
     kalshi_result = "YES" if (trade.actual_temp or 0) >= 1.0 else "NO"
     pnl_sign = "+" if (trade.pnl or 0) >= 0 else ""
+    is_live = not getattr(trade, "is_paper", True)
     color = COLOR_GREEN if trade.result == "win" else COLOR_RED
+    mode_prefix = "💸 LIVE" if is_live else "📝 PAPER"
 
     yes_outcome = 1.0 if (trade.actual_temp or 0) >= 1.0 else 0.0
     brier_contrib = (trade.model_prob - yes_outcome) ** 2
@@ -290,11 +210,11 @@ def send_trade_settled_alert(trade, bankroll: Optional[float] = None) -> bool:
         fields.append({"name": "Bankroll", "value": f"**${bankroll:,.2f}**", "inline": True})
 
     embed = {
-        "title": f"{icon} SETTLED — {trade.ticker}",
+        "title": f"{icon} {mode_prefix} SETTLED — {trade.ticker}",
         "description": f"**{trade.city.upper()}** · {trade.metric.upper()} · {trade.threshold_f:.0f}°F · {trade.resolution_date}",
         "color": color,
         "fields": fields,
-        "footer": {"text": "Kalshi Weather Arb Bot · Settlement"},
+        "footer": {"text": f"Kalshi Weather Arb Bot · {'Live' if is_live else 'Paper'} Settlement"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -322,14 +242,6 @@ def send_paper_trade_alert(signal, trade) -> bool:
     agreement = getattr(signal, "agreement", "MEDIUM")
     outlier = getattr(signal, "outlier_dampened", None)
     agreement_icon = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}.get(agreement, "🟡")
-    source_parts = []
-    for n in ["gfs", "ecmwf", "gem", "nws"]:
-        if n in sp:
-            tag = " ⚡" if n == outlier else ""
-            source_parts.append(f"{n.upper()}: {sp[n]:.0%}{tag}")
-    source_breakdown = "  |  ".join(source_parts) if source_parts else "GFS only"
-    if outlier:
-        source_breakdown += f"\n*{outlier.upper()} dampened (outlier)*"
 
     # Show all probabilities from the perspective of the side we're betting.
     # model_probability and market_probability are always P(YES).
@@ -341,7 +253,7 @@ def send_paper_trade_alert(signal, trade) -> bool:
     prob_label       = f"Our Model P({side})"
     market_label     = f"Market P({side})"
 
-    # Per-source breakdown: also flip to NO side
+    # Per-source breakdown: flip to NO side when betting NO
     source_parts = []
     for n in ["gfs", "ecmwf", "gem", "nws"]:
         if n in sp:
@@ -597,6 +509,25 @@ def send_startup_message(simulation_mode: bool, bankroll: float) -> bool:
     }
 
     return _post_embed(embed)
+
+
+def send_live_order_failed_alert(ticker: str, reason: str) -> bool:
+    """Send a Discord alert when a live order fails to place (e.g. insufficient funds)."""
+    if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    embed = {
+        "title": f"🚨 LIVE ORDER FAILED — {ticker}",
+        "description": reason,
+        "color": COLOR_RED,
+        "footer": {"text": "Kalshi Weather Arb Bot · Live Trading Error"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    success = _post_embed(embed)
+    if success:
+        logger.info(f"Discord live order failure alert sent: {ticker}")
+    return success
 
 
 def send_live_trade_alert(signal, trade) -> bool:

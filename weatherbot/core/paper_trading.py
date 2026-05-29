@@ -35,6 +35,15 @@ def log_paper_trade(signal) -> Optional[Trade]:
     if entry_price <= 0:
         return None
 
+    # Skip if sizing can't cover even 1 contract — prevents the max(1,...) floor
+    # from logging phantom trades when bankroll scaling has reduced size to ~$0.
+    if signal.suggested_size < entry_price:
+        logger.debug(
+            f"Paper trade skipped (undersized): {market.market_id} "
+            f"suggested=${signal.suggested_size:.2f} < 1-contract cost=${entry_price:.2f}"
+        )
+        return None
+
     contracts = max(1, int(signal.suggested_size / entry_price))
 
     # Determine whether this trade implies a warm or cold outlook.
@@ -156,7 +165,7 @@ async def settle_paper_trades() -> List[Trade]:
         pending = db.query(Trade).filter(
             Trade.is_paper == True,
             Trade.resolved == False,
-            Trade.resolution_date < today.isoformat(),
+            Trade.resolution_date <= today.isoformat(),
         ).all()
 
         if not pending:

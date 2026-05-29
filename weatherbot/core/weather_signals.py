@@ -663,14 +663,14 @@ def _dedup_correlated(signals: List[WeatherTradingSignal]) -> List[WeatherTradin
 
 def _available_bankroll() -> float:
     """
-    Return bankroll minus capital currently locked in open paper trades.
+    Return bankroll minus capital currently locked in open trades (paper and live).
     Falls back to INITIAL_BANKROLL if the DB is unreachable.
     """
     try:
-        from weatherbot.models.trade import SessionLocal as PaperSessionLocal, Trade as PaperTrade
-        db = PaperSessionLocal()
+        from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade as TradeModel
+        db = TradeSessionLocal()
         try:
-            open_trades = db.query(PaperTrade).filter(PaperTrade.is_paper == True, PaperTrade.resolved == False).all()
+            open_trades = db.query(TradeModel).filter(TradeModel.resolved == False).all()
             committed = sum(t.kelly_size for t in open_trades if t.kelly_size)
             available = max(0.0, settings.INITIAL_BANKROLL - committed)
             return available

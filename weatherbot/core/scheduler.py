@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 from weatherbot.config import settings
 from weatherbot.core.paper_trading import get_paper_stats
 from weatherbot.core.trade_manager import execute_signal, settle_trades
+from weatherbot.core.trading import get_live_stats
 from weatherbot.core.weather_signals import scan_for_weather_signals
 from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade
 from weatherbot.models.weather_db import SessionLocal, Signal
@@ -71,7 +72,9 @@ async def weather_scan_job():
             )
             return
 
-        candidates = [s for s in scan.signals if s.passes_paper_threshold]
+        candidates = [s for s in scan.signals if (
+            s.passes_threshold if settings.LIVE_TRADING else s.passes_paper_threshold
+        )]
 
         for signal in candidates:
             ticker = signal.market.market_id
@@ -124,8 +127,9 @@ async def settlement_job():
                 f"Trades settled: {len(settled)} ({wins}W/{losses}L/{cancelled} cancelled)  "
                 f"P&L ${pnl:+.2f}"
             )
-            stats = get_paper_stats()
-            bankroll = settings.INITIAL_BANKROLL + stats["total_pnl"]
+            paper_stats = get_paper_stats()
+            live_stats  = get_live_stats()
+            bankroll = settings.INITIAL_BANKROLL + paper_stats["total_pnl"] + live_stats["total_pnl"]
             for t in settled:
                 try:
                     send_trade_settled_alert(t, bankroll=bankroll)
@@ -204,6 +208,7 @@ async def daily_summary_job():
             paper_stats=paper_stats,
             scan_report=_latest_scan_report,
             daily_brier=daily_brier,
+            live_stats=get_live_stats(),
         )
 
     except Exception as e:
