@@ -40,9 +40,8 @@ services:
       - key: LIVE_TRADING
         value: "false"
 
-      # Point at Kalshi prod when ready; default is demo
       - key: KALSHI_API_BASE_URL
-        value: "https://demo-api.kalshi.co/trade-api/v2"
+        value: "https://trading-api.kalshi.com/trade-api/v2"
 
 
 databases:

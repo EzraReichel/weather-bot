@@ -40,8 +40,7 @@ class Settings(BaseSettings):
 
     # Live trading — default FALSE so paper trading requires explicit opt-in to go live
     LIVE_TRADING: bool = False
-    # Default to demo URL; prod requires explicit override to prod URL in .env
-    KALSHI_API_BASE_URL: str = "https://demo-api.kalshi.co/trade-api/v2"
+    KALSHI_API_BASE_URL: str = "https://trading-api.kalshi.com/trade-api/v2"
     # Hard cap per live order in dollars (set low during initial live testing)
     LIVE_MAX_TRADE_SIZE: float = 5.0
 
