@@ -127,13 +127,16 @@ function MissionControl() {
           <HeaderStat label="Total trades" value={trades.length} color={C.text} />
         </div>
 
-        {isLive && (
-          <div style={S.headerRight}>
-            <span style={{ ...S.badge, background: "#fef2f2", color: C.red, border: `1px solid ${C.red}33` }}>
+        <div style={S.headerRight}>
+          {isLive && (
+            <span style={{ ...S.badge, background: "#fef2f2", color: C.red, border: `1px solid ${C.red}33`, marginBottom: 4 }}>
               Live
             </span>
+          )}
+          <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, textAlign: "right", letterSpacing: "0.01em" }}>
+            Quattro Reichel
           </div>
-        )}
+        </div>
       </header>
 
       {/* Tabs */}
@@ -974,7 +977,7 @@ const S = {
   appSub: { fontSize: 11, color: C.muted, marginTop: 1 },
   headerStats: { display: "flex", alignItems: "center", gap: 24, flex: 1, justifyContent: "center" },
   statDivider: { width: 1, height: 32, background: C.border },
-  headerRight: { flexShrink: 0 },
+  headerRight: { flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "flex-end" },
 
   // Tabs
   tabBar: {
