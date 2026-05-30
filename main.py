@@ -53,7 +53,9 @@ async def health():
 async def trigger_report():
     """Post a full paper trading report to Discord. Hit from anywhere."""
     from weatherbot.notifications.discord import send_paper_report
-    ok = send_paper_report()
+    from weatherbot.data.kalshi_client import fetch_live_balance
+    bankroll = await fetch_live_balance()
+    ok = send_paper_report(bankroll=bankroll)
     return JSONResponse({"sent": ok})
 
 
@@ -301,7 +303,7 @@ async def on_startup():
     try:
         from weatherbot.data.kalshi_client import fetch_live_balance
         from weatherbot.notifications.discord import send_startup_message
-        startup_balance = asyncio.run(fetch_live_balance())
+        startup_balance = await fetch_live_balance()
         send_startup_message(not settings.LIVE_TRADING, startup_balance)
     except Exception as e:
         logger.warning(f"Discord startup ping failed: {e}")
