@@ -269,8 +269,9 @@ def start_scheduler():
         f"daily summary at 23:00 ET"
     )
 
-    # Run first scan immediately
+    # Run first scan and settlement immediately on startup
     asyncio.create_task(weather_scan_job())
+    asyncio.create_task(settlement_job())
 
 
 def stop_scheduler():

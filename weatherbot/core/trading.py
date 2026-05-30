@@ -191,15 +191,11 @@ async def settle_live_trades() -> List[Trade]:
         client = KalshiClient()
 
         for trade in pending:
-            # ── Step 1: check if the order filled ─────────────────────────
-            filled = await _check_order_filled(client, trade)
+            # ── Step 1: check how many contracts filled ────────────────────
+            filled_count = await _check_order_filled(client, trade)
 
-            if filled is None:
-                logger.info(f"Skipping {trade.ticker} — could not fetch order status")
-                continue
-
-            if not filled:
-                # Order expired or was cancelled without filling — no P&L
+            if filled_count == 0:
+                # Explicitly cancelled/expired with zero fills — no P&L
                 trade.resolved    = True
                 trade.result      = "cancelled"
                 trade.pnl         = 0.0
@@ -209,20 +205,36 @@ async def settle_live_trades() -> List[Trade]:
                 continue
 
             # ── Step 2: fetch the Kalshi market result ─────────────────────
+            # Run this even when fill count is unknown (None) so a
+            # resting-but-resolved market doesn't block settlement indefinitely.
             kalshi_result = await _fetch_kalshi_result(trade.ticker)
 
             if kalshi_result is None:
                 logger.info(f"Skipping {trade.ticker} — Kalshi result not posted yet")
                 continue
 
+            if filled_count is None:
+                logger.warning(
+                    f"Order fill count unknown for {trade.ticker} "
+                    f"(order_id={trade.kalshi_order_id}) — market resolved "
+                    f"{kalshi_result.upper()}, settling with recorded contract count"
+                )
+                filled_count = trade.contracts
+            elif filled_count != trade.contracts:
+                logger.info(
+                    f"Partial fill for {trade.ticker}: "
+                    f"{filled_count}/{trade.contracts} contracts filled"
+                )
+                trade.contracts = filled_count
+
             yes_wins = (kalshi_result == "yes")
             we_win = yes_wins if trade.side == "yes" else not yes_wins
 
             if we_win:
-                pnl = (1.0 - trade.entry_price) * trade.contracts * (1.0 - settings.KALSHI_FEE_RATE)
+                pnl = (1.0 - trade.entry_price) * filled_count * (1.0 - settings.KALSHI_FEE_RATE)
                 result = "win"
             else:
-                pnl = trade.entry_price * trade.contracts * -1.0
+                pnl = trade.entry_price * filled_count * -1.0
                 result = "loss"
 
             trade.resolved    = True
@@ -250,24 +262,41 @@ async def settle_live_trades() -> List[Trade]:
     return settled
 
 
-async def _check_order_filled(client, trade) -> Optional[bool]:
+async def _check_order_filled(client, trade) -> Optional[int]:
     """
-    Returns True if the order filled, False if it expired/cancelled unfilled,
-    None if the order status couldn't be fetched.
+    Returns the number of contracts that actually filled:
+      - Positive int: that many contracts filled (may be less than trade.contracts for partial fills)
+      - 0: order cancelled/expired with no fills
+      - None: order status couldn't be determined
     """
     if not trade.kalshi_order_id:
-        # No order ID recorded — assume filled (best we can do)
-        return True
+        # No order ID recorded — assume fully filled
+        return trade.contracts
     try:
         data = await client.get_order(trade.kalshi_order_id)
         order = data.get("order", data)
         status = order.get("status", "")
-        # Kalshi order statuses: "resting", "filled", "cancelled", "expired"
+
+        # Derive filled count from order fields.
+        # Kalshi may return filled_count directly, or we compute it from count - remaining_count.
+        count     = int(order.get("count", 0) or 0)
+        remaining = int(order.get("remaining_count", 0) or 0)
+        filled_direct = int(
+            order.get("filled_count", 0) or order.get("count_filled", 0) or 0
+        )
+        filled_count = filled_direct if filled_direct > 0 else max(0, count - remaining)
+
+        # Kalshi order statuses: "resting", "filled", "canceled"/"cancelled", "expired"
         if status == "filled":
-            return True
-        if status in ("cancelled", "expired"):
-            return False
-        # "resting" means still open — resolution date passed but order not resolved yet
+            return filled_count if filled_count > 0 else trade.contracts
+
+        if status in ("cancelled", "canceled", "expired"):
+            # Could be a partial fill that was then cancelled — return actual fill count
+            return filled_count  # 0 = no fill, positive = partial fill before cancellation
+
+        # "resting": order still open; if we have a non-zero fill count from the
+        # API fields it means a partial fill happened so far — but don't settle yet
+        # since remaining contracts are still in play.  Return None to retry later.
         return None
     except Exception as e:
         logger.debug(f"Could not fetch order status for {trade.kalshi_order_id}: {e}")
