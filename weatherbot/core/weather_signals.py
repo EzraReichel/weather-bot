@@ -683,15 +683,23 @@ def _dedup_correlated(signals: List[WeatherTradingSignal]) -> List[WeatherTradin
 
 def _available_bankroll(live_bankroll: float) -> float:
     """
-    Return live_bankroll minus capital currently locked in open trades (paper and live).
+    Return live_bankroll minus capital locked in open live trades.
+
+    Only live (is_paper=False) trades are subtracted — paper trades don't consume
+    real capital. Kalshi's balance field is available cash, so filled live trades
+    are already reflected in live_bankroll; subtracting here is conservative but
+    catches resting (unfilled) orders whose cost isn't yet deducted by Kalshi.
     Falls back to live_bankroll unchanged if the DB is unreachable.
     """
     try:
         from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade as TradeModel
         db = TradeSessionLocal()
         try:
-            open_trades = db.query(TradeModel).filter(TradeModel.resolved == False).all()
-            committed = sum(t.kelly_size for t in open_trades if t.kelly_size)
+            open_live_trades = db.query(TradeModel).filter(
+                TradeModel.resolved == False,
+                TradeModel.is_paper == False,
+            ).all()
+            committed = sum(t.kelly_size for t in open_live_trades if t.kelly_size)
             available = max(0.0, live_bankroll - committed)
             return available
         finally:
