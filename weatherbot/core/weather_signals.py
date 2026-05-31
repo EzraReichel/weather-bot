@@ -29,10 +29,8 @@ YES_ENTRY_FLOOR            = 0.30  # minimum entry price for YES bets (empirical
 RAIN_ENTRY_FLOOR           = 0.05  # minimum entry price for rain market bets
 
 # Trading hours — model runs fire at these ET hours; data older than MAX_AGE is stale
-MODEL_RUN_HOURS_ET         = [(3, 30), (9, 30), (15, 30), (21, 30)]
-MODEL_DATA_MAX_AGE_HOURS   = 5.0   # skip if last model run was >5h ago
-SAME_DAY_HIGH_CUTOFF_HOUR  = 10    # don't enter same-day high markets at/after 10 AM ET
-SAME_DAY_LOW_CUTOFF_HOUR   = 7     # don't enter same-day low markets at/after 7 AM ET
+MODEL_RUN_HOURS_ET       = [(3, 30), (9, 30), (15, 30), (21, 30)]
+MODEL_DATA_MAX_AGE_HOURS = 5.0   # skip if last model run was >5h ago
 from weatherbot.data.weather_markets import WeatherMarket
 from weatherbot.models.weather_db import SessionLocal, Signal
 
@@ -95,14 +93,14 @@ class WeatherTradingSignal:
 
 def _trading_hours_filter(market: WeatherMarket) -> Optional[str]:
     """
-    Returns a reason string if this market should be skipped due to trading hours,
-    or None if trading is allowed.
+    Returns a reason string if this market should be skipped due to model data staleness,
+    or None if the data is fresh enough to trade.
 
-    Two gates:
-      1. Model data staleness — skip if the last model run was >MODEL_DATA_MAX_AGE_HOURS ago.
-         Between runs the market's real-time orderbook is often more informed than our model.
-      2. Same-day event proximity — once the weather event is imminent, the market already
-         reflects live observations better than any forecast model.
+    Skips if the last model run (03:30/09:30/15:30/21:30 ET) was >MODEL_DATA_MAX_AGE_HOURS ago.
+    Between runs the market's real-time orderbook may be more informed than our stale model.
+
+    Same-day event proximity is checked separately in generate_weather_signal after
+    probabilities are computed.
     """
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("America/New_York")
@@ -120,12 +118,6 @@ def _trading_hours_filter(market: WeatherMarket) -> Optional[str]:
     if min_hours_since_run > MODEL_DATA_MAX_AGE_HOURS:
         return f"stale_model_data ({min_hours_since_run:.1f}h since last run, max {MODEL_DATA_MAX_AGE_HOURS:.0f}h)"
 
-    # Gate 2: same-day event proximity
-    if market.metric in ("high", "low") and market.target_date == now_et.date():
-        cutoff = SAME_DAY_HIGH_CUTOFF_HOUR if market.metric == "high" else SAME_DAY_LOW_CUTOFF_HOUR
-        if now_et.hour >= cutoff:
-            return f"same_day_{market.metric}_cutoff (now={now_et.hour:02d}:00 ET >= cutoff={cutoff:02d}:00 ET)"
-
     return None
 
 
@@ -137,12 +129,6 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     gracefully to single-source GFS if multi-source fetch fails.
     """
     bankroll = live_bankroll if live_bankroll is not None else settings.INITIAL_BANKROLL
-
-    # ── Trading hours gate ────────────────────────────────────────────────
-    _hours_reason = _trading_hours_filter(market)
-    if _hours_reason:
-        logger.debug(f"SKIP {market.market_id}: trading hours — {_hours_reason}")
-        return None
 
     # ── Rain markets: use precipitation probability directly ──────────────────
     if market.metric == "rain":
@@ -451,6 +437,37 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
         market_yes_prob = (market.yes_ask + market.yes_bid) / 2.0
     else:
         market_yes_prob = market.yes_price  # ask only — bid not exposed by API
+
+    # ── Trading hours gates (with high-conviction bypass) ────────────────
+    # Both gates are checked here (after probabilities) so the conviction
+    # exception can be evaluated. If both model AND market are >= threshold
+    # in the same direction, the signal is allowed regardless of time.
+    from zoneinfo import ZoneInfo as _ZI
+    _now_et = datetime.now(_ZI("America/New_York"))
+    _thresh = settings.TRADING_HOURS_CONVICTION_THRESHOLD
+    _high_conviction = (
+        # YES direction: model >= thresh+10%, market >= thresh (model leads by ≥10%)
+        (model_yes_prob >= _thresh + 0.10 and market_yes_prob >= _thresh)
+        # NO direction: model says NO >= thresh+10%, market says NO >= thresh
+        or (model_yes_prob <= 1.0 - (_thresh + 0.10) and market_yes_prob <= 1.0 - _thresh)
+    )
+
+    # Gate 1: model data staleness
+    _stale_reason = _trading_hours_filter(market)
+    if _stale_reason and not _high_conviction:
+        logger.debug(f"SKIP {market.market_id}: {_stale_reason}")
+        return None
+
+    # Gate 2: same-day event proximity
+    if market.metric in ("high", "low") and market.target_date == _now_et.date():
+        _cutoff = (settings.SAME_DAY_HIGH_CUTOFF_HOUR if market.metric == "high"
+                   else settings.SAME_DAY_LOW_CUTOFF_HOUR)
+        if _now_et.hour >= _cutoff and not _high_conviction:
+            logger.debug(
+                f"SKIP {market.market_id}: same_day_{market.metric}_cutoff "
+                f"(past {_cutoff:02d}:00 ET, model={model_yes_prob:.0%} market={market_yes_prob:.0%})"
+            )
+            return None
 
     # Edge direction
     edge = model_yes_prob - market_yes_prob

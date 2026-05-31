@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # Hard cap per live order in dollars (set low during initial live testing)
     LIVE_MAX_TRADE_SIZE: float = 5.0
 
+    # Trading hours
+    SAME_DAY_HIGH_CUTOFF_HOUR: int = 9        # stop entering same-day high markets at/after this hour ET
+    SAME_DAY_LOW_CUTOFF_HOUR: int = 7         # stop entering same-day low markets at/after this hour ET
+    TRADING_HOURS_CONVICTION_THRESHOLD: float = 0.75  # bypass all time gates when both model AND market >= this
+
     # Health check
     PORT: int = 8080
 
