@@ -294,11 +294,7 @@ def compute_multi_source_probability(
             continue
 
         import statistics as _stats
-        members = src.member_highs if direction in ("above", "below") else src.member_lows
-        # Pick the right list based on direction — but we don't know metric here,
-        # so callers pass the already-correct list. Use member_highs as primary,
-        # caller should pass appropriately filtered SourceForecast.
-        members = src.member_highs  # caller is responsible — see weather_signals.py
+        members = src.member_highs  # caller pre-loads the correct metric into member_highs — see weather_signals.py
 
         if len(members) < 2:
             continue
@@ -436,7 +432,7 @@ def min_profitable_edge(fee_rate: float) -> float:
 
 def kelly_size(
     model_prob: float,
-    market_price: float,
+    entry_price: float,    # actual ask for the chosen direction (yes_price or no_price)
     direction: str,        # "yes" or "no"
     bankroll: float,
     kelly_fraction: float,
@@ -445,9 +441,6 @@ def kelly_size(
     """
     Kelly-sized position amount, net of Kalshi fees.
 
-    For YES bet: entry_price = market_price (yes_price)
-    For NO bet:  entry_price = 1 - market_price (no_price)
-
     Kelly fraction: f = (b*p - q) / b
     where b = (1 - entry_price) / entry_price (net odds)
           p = model_prob of winning
@@ -455,10 +448,10 @@ def kelly_size(
     Then subtract fee from expected value before sizing.
     """
     if direction == "yes":
-        entry = market_price
+        entry = entry_price
         p_win = model_prob
     else:
-        entry = 1.0 - market_price
+        entry = entry_price
         p_win = 1.0 - model_prob
 
     if entry <= 0 or entry >= 1:

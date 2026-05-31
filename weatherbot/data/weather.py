@@ -77,16 +77,6 @@ class EnsembleForecast:
         """Fraction of ensemble members with daily low below threshold."""
         return 1.0 - self.probability_low_above(threshold_f)
 
-    @property
-    def ensemble_agreement(self) -> float:
-        """How one-sided the ensemble is (0.5 = split, 1.0 = unanimous)."""
-        if not self.member_highs:
-            return 0.5
-        median = statistics.median(self.member_highs)
-        above = sum(1 for h in self.member_highs if h > median)
-        frac = above / len(self.member_highs)
-        return max(frac, 1 - frac)
-
 
 # Simple cache: (city_key, target_date_str) -> (timestamp, EnsembleForecast)
 _forecast_cache: Dict[str, tuple] = {}

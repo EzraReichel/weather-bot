@@ -1,7 +1,7 @@
 """Signal generator using ensemble-of-ensembles (GFS + ECMWF + GEM + NWS)."""
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from weatherbot.config import settings
@@ -27,6 +27,12 @@ COLD_DAY_MARGIN            = 4.0   # °F below threshold required for cold-day Y
 COLD_DAY_NWS_MIN           = 0.85  # NWS prob floor for cold-day YES exception
 YES_ENTRY_FLOOR            = 0.30  # minimum entry price for YES bets (empirical: <30¢ wins ~7%)
 RAIN_ENTRY_FLOOR           = 0.05  # minimum entry price for rain market bets
+
+# Trading hours — model runs fire at these ET hours; data older than MAX_AGE is stale
+MODEL_RUN_HOURS_ET         = [(3, 30), (9, 30), (15, 30), (21, 30)]
+MODEL_DATA_MAX_AGE_HOURS   = 5.0   # skip if last model run was >5h ago
+SAME_DAY_HIGH_CUTOFF_HOUR  = 10    # don't enter same-day high markets at/after 10 AM ET
+SAME_DAY_LOW_CUTOFF_HOUR   = 7     # don't enter same-day low markets at/after 7 AM ET
 from weatherbot.data.weather_markets import WeatherMarket
 from weatherbot.models.weather_db import SessionLocal, Signal
 
@@ -87,6 +93,42 @@ class WeatherTradingSignal:
         return abs(self.edge) >= edge_threshold
 
 
+def _trading_hours_filter(market: WeatherMarket) -> Optional[str]:
+    """
+    Returns a reason string if this market should be skipped due to trading hours,
+    or None if trading is allowed.
+
+    Two gates:
+      1. Model data staleness — skip if the last model run was >MODEL_DATA_MAX_AGE_HOURS ago.
+         Between runs the market's real-time orderbook is often more informed than our model.
+      2. Same-day event proximity — once the weather event is imminent, the market already
+         reflects live observations better than any forecast model.
+    """
+    from zoneinfo import ZoneInfo
+    ET = ZoneInfo("America/New_York")
+    now_et = datetime.now(ET)
+
+    # Gate 1: model data freshness
+    min_hours_since_run = float("inf")
+    for h, m in MODEL_RUN_HOURS_ET:
+        run_dt = now_et.replace(hour=h, minute=m, second=0, microsecond=0)
+        if run_dt > now_et:
+            run_dt -= timedelta(days=1)
+        hours_since = (now_et - run_dt).total_seconds() / 3600.0
+        min_hours_since_run = min(min_hours_since_run, hours_since)
+
+    if min_hours_since_run > MODEL_DATA_MAX_AGE_HOURS:
+        return f"stale_model_data ({min_hours_since_run:.1f}h since last run, max {MODEL_DATA_MAX_AGE_HOURS:.0f}h)"
+
+    # Gate 2: same-day event proximity
+    if market.metric in ("high", "low") and market.target_date == now_et.date():
+        cutoff = SAME_DAY_HIGH_CUTOFF_HOUR if market.metric == "high" else SAME_DAY_LOW_CUTOFF_HOUR
+        if now_et.hour >= cutoff:
+            return f"same_day_{market.metric}_cutoff (now={now_et.hour:02d}:00 ET >= cutoff={cutoff:02d}:00 ET)"
+
+    return None
+
+
 async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional[float] = None) -> Optional[WeatherTradingSignal]:
     """
     Generate a trading signal using ensemble-of-ensembles probability model.
@@ -95,6 +137,13 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     gracefully to single-source GFS if multi-source fetch fails.
     """
     bankroll = live_bankroll if live_bankroll is not None else settings.INITIAL_BANKROLL
+
+    # ── Trading hours gate ────────────────────────────────────────────────
+    _hours_reason = _trading_hours_filter(market)
+    if _hours_reason:
+        logger.debug(f"SKIP {market.market_id}: trading hours — {_hours_reason}")
+        return None
+
     # ── Rain markets: use precipitation probability directly ──────────────────
     if market.metric == "rain":
         return await _generate_rain_signal(market, bankroll)
@@ -312,6 +361,51 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
                             )
                             return _sig
 
+                    if market.metric == "low":
+                        if market.direction == "above" and obs_min < market.threshold_f:
+                            # Daily low already dropped below threshold — YES (low above X) has already lost
+                            logger.info(
+                                f"SKIP {market.market_id}: observed_min={obs_min:.1f}F < "
+                                f"threshold={market.threshold_f:.0f}F — market already resolved NO"
+                            )
+                            _sig = WeatherTradingSignal(
+                                market=market, model_probability=model_yes_prob,
+                                market_probability=market.yes_price, edge=0.0,
+                                direction="yes", confidence=confidence,
+                                kelly_fraction=0.0, suggested_size=0.0,
+                                reasoning=f"[FILTERED:obs_resolved] observed_min={obs_min:.1f}F < threshold={market.threshold_f:.0f}F",
+                                ensemble_mean=ensemble_mean, ensemble_std=ensemble_std,
+                                ensemble_members=ensemble_members,
+                                low_confidence_flag=low_conf,
+                                source_probs=source_probs_map, agreement=agreement,
+                                sources_used=sources_used,
+                                outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+                                filter_reason="obs_resolved",
+                            )
+                            return _sig
+
+                        if market.direction == "below" and obs_min < market.threshold_f:
+                            # Daily low already went below threshold — YES (low below X) has already won; market ≈ 99¢
+                            logger.info(
+                                f"SKIP {market.market_id}: observed_min={obs_min:.1f}F < "
+                                f"threshold={market.threshold_f:.0f}F — YES already guaranteed, skip"
+                            )
+                            _sig = WeatherTradingSignal(
+                                market=market, model_probability=model_yes_prob,
+                                market_probability=market.yes_price, edge=0.0,
+                                direction="yes", confidence=confidence,
+                                kelly_fraction=0.0, suggested_size=0.0,
+                                reasoning=f"[FILTERED:obs_guaranteed] observed_min={obs_min:.1f}F < threshold={market.threshold_f:.0f}F",
+                                ensemble_mean=ensemble_mean, ensemble_std=ensemble_std,
+                                ensemble_members=ensemble_members,
+                                low_confidence_flag=low_conf,
+                                source_probs=source_probs_map, agreement=agreement,
+                                sources_used=sources_used,
+                                outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+                                filter_reason="obs_guaranteed",
+                            )
+                            return _sig
+
         except Exception as _obs_err:
             logger.debug(f"Observation constraint check failed for {market.market_id}: {_obs_err}")
 
@@ -400,7 +494,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
         sizing_prob = model_yes_prob
     suggested_size = kelly_size(
         model_prob=sizing_prob,
-        market_price=market_yes_prob,
+        entry_price=entry_price,
         direction=direction,
         bankroll=bankroll,
         kelly_fraction=settings.KELLY_FRACTION,
@@ -494,7 +588,7 @@ async def _generate_rain_signal(market: WeatherMarket, live_bankroll: Optional[f
         rain_sizing_prob = model_yes_prob
     suggested_size = kelly_size(
         model_prob=rain_sizing_prob,
-        market_price=market_yes_prob,
+        entry_price=entry_price,
         direction=direction,
         bankroll=bankroll,
         kelly_fraction=settings.KELLY_FRACTION,
