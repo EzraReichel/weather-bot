@@ -43,7 +43,7 @@ app = FastAPI(docs_url=None, redoc_url=None)
 FRONTEND_DIR = Path(__file__).parent / "dashboard"
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return JSONResponse({"status": "ok"})
 
