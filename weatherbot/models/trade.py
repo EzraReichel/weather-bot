@@ -43,8 +43,13 @@ class Trade(TradeBase):
     resolution_date  = Column(String)                       # YYYY-MM-DD
 
     # Live trading fields (null for paper trades)
-    kalshi_order_id  = Column(String, nullable=True)
+    kalshi_order_id  = Column(String, nullable=True)   # FIRST order's id (kept for back-compat)
     fill_price       = Column(Float, nullable=True)
+    # JSON list of every order that built this position (original + top-ups):
+    #   [{"id": "<order_id>", "price": <fill_price 0-1>, "n": <contracts>}, ...]
+    # entry_price/contracts hold the running weighted-average basis and total;
+    # settlement recomputes the basis from each order's ACTUAL fills.
+    orders           = Column(String, nullable=True)
 
     # Settlement
     actual_temp      = Column(Float, nullable=True)         # 1.0=YES won, 0.0=NO won
@@ -107,6 +112,7 @@ def _migrate():
             ("model_probs",     "TEXT"),
             ("kalshi_order_id", "VARCHAR"),
             ("fill_price",      "FLOAT"),
+            ("orders",          "TEXT"),
         ]
         for col, typedef in new_cols:
             if col not in cols:

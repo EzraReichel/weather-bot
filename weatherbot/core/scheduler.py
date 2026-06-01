@@ -22,6 +22,7 @@ from weatherbot.models.weather_db import SessionLocal, Signal
 from weatherbot.notifications.discord import (
     poll_discord_commands,
     send_daily_summary,
+    send_live_position_increase_alert,
     send_live_trade_alert,
     send_paper_trade_alert,
     send_trade_settled_alert,
@@ -67,7 +68,19 @@ async def weather_scan_job():
             trade = await execute_signal(signal)
 
             if trade is None:
-                continue   # dedup or error — no alert
+                continue   # already at target or error — no alert
+
+            # A top-up folds into the existing position row and carries a
+            # transient `topup_added` hint. Position-increase updates always
+            # alert (bypassing the per-ticker dedup window) so each add is
+            # visible; fresh orders stay rate-limited.
+            added = getattr(trade, "topup_added", None)
+            if added:
+                try:
+                    send_live_position_increase_alert(signal, trade, added)
+                except Exception as e:
+                    logger.error(f"Failed to send position-increase alert for {ticker}: {e}")
+                continue
 
             last_alerted = _alerted_tickers.get(ticker)
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)

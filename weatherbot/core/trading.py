@@ -2,7 +2,7 @@
 import json
 import logging
 from datetime import date, datetime
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from weatherbot.config import settings
 from weatherbot.core.paper_trading import _fetch_kalshi_result
@@ -20,10 +20,39 @@ def _is_weather_ticker(ticker: str) -> bool:
     return any(ticker.upper().startswith(p) for p in _WEATHER_PREFIXES)
 
 
+def _position_orders(trade) -> List[dict]:
+    """
+    Return the list of orders that built a position as
+    [{"id", "price", "n"}, ...].
+
+    New rows store this directly in trade.orders (JSON). Legacy rows predate the
+    column, so reconstruct a single-order list from the flat fields.
+    """
+    if trade.orders:
+        try:
+            parsed = json.loads(trade.orders)
+            if isinstance(parsed, list) and parsed:
+                return parsed
+        except (ValueError, TypeError):
+            logger.warning(f"Bad orders JSON on trade {trade.id} ({trade.ticker}) — using flat fields")
+    return [{
+        "id":    trade.kalshi_order_id,
+        "price": trade.fill_price if trade.fill_price else trade.entry_price,
+        "n":     trade.contracts or 0,
+    }]
+
+
 async def log_live_trade(signal) -> Optional[Trade]:
     """
     Place a real Kalshi order and record it as a live Trade (is_paper=False).
-    Returns the Trade row, or None if skipped (dedup, error, zero price).
+
+    Reconciles against any existing open orders for the same market+side: only
+    the gap between contracts already working (filled + resting) and the Kelly
+    target is ordered, so partial fills get topped up on later scans instead of
+    being left stuck below target until settlement.
+
+    Returns the new Trade row, or None if skipped (already at target, error,
+    zero price).
     """
     init_trade_db()
 
@@ -42,23 +71,98 @@ async def log_live_trade(signal) -> Optional[Trade]:
         return None
 
     capped_size = min(signal.suggested_size, settings.LIVE_MAX_TRADE_SIZE)
-    contracts = max(1, int(capped_size / entry_price))
+    target_contracts = max(1, int(capped_size / entry_price))
     yes_price_cents = round(market.yes_price * 100)  # always YES-side price per Kalshi API
 
     db = SessionLocal()
     try:
+        from weatherbot.data.kalshi_client import KalshiClient
+        from weatherbot.notifications.discord import send_live_order_failed_alert
+        client = KalshiClient()
+
+        # ── Reconcile against existing orders (top-up logic) ──────────────────
+        # Instead of skipping when a pending trade exists, count how many
+        # contracts are already working for this market (filled + still resting
+        # on the same side) and only order the remaining gap to the Kelly
+        # target.  A partial fill on an earlier scan thus gets topped up here
+        # rather than left stuck below target until settlement.
         existing = db.query(Trade).filter(
             Trade.ticker == market.market_id,
             Trade.is_paper == False,
             Trade.resolved == False,
-        ).first()
-        if existing:
-            logger.debug(f"Live dedup skipped: {market.market_id} (already pending)")
+            Trade.side == signal.direction,
+        ).all()
+
+        # A market+side has at most one open position row now (top-ups fold into
+        # it), but query defensively in case legacy data has several.
+        already_working = 0
+        for ex in existing:
+            filled, resting, undetermined, _ = await _position_fill_status(client, ex)
+            # Undetermined orders count as working so a transient API hiccup
+            # never makes us double-order.
+            already_working += filled + resting + undetermined
+
+        contracts = target_contracts - already_working
+        if contracts <= 0:
+            logger.debug(
+                f"Live top-up skipped: {market.market_id} — "
+                f"{already_working} contracts already working ≥ target {target_contracts}"
+            )
             return None
 
-        from weatherbot.data.kalshi_client import KalshiClient
-        from weatherbot.notifications.discord import send_live_order_failed_alert
-        client = KalshiClient()
+        # The position row top-ups fold into — the earliest existing order.
+        anchor = min(existing, key=lambda ex: ex.created_at or datetime.max) if existing else None
+
+        if existing:
+            # ── Top-up guards ─────────────────────────────────────────────────
+            # The edge is already re-checked upstream each scan (the signal only
+            # reaches here if it still clears MIN_EDGE_THRESHOLD at the current
+            # price), so every add is +EV at the moment. That handles the
+            # "chasing up" case — when the ask rises toward our view, edge shrinks
+            # and the gate eventually blocks it. The dangerous direction is the
+            # opposite: when our side's ask FALLS, the market is disagreeing with
+            # us harder and Kelly wants to add MORE. Averaging down like that is
+            # only safe if our (possibly stale) model still backs the position.
+            first_fill = anchor.fill_price or anchor.entry_price
+
+            def _our_conviction(p_yes: float) -> float:
+                # Confidence in the side we're actually holding (0..1).
+                return p_yes if signal.direction == "yes" else 1.0 - p_yes
+
+            entry_conviction   = _our_conviction(anchor.model_prob or 0.0)
+            current_conviction = _our_conviction(signal.model_probability)
+
+            # Guard A — model must still corroborate the position. If our own
+            # conviction has weakened since entry, don't add even if a stale edge
+            # still clears threshold.
+            if current_conviction < entry_conviction:
+                logger.info(
+                    f"LIVE TOP-UP SKIPPED — model weakened: {market.market_id} "
+                    f"{signal.direction.upper()} conviction "
+                    f"{current_conviction:.0%} < entry {entry_conviction:.0%}"
+                )
+                return None
+
+            # Guard B — averaging down. If our ask has fallen more than
+            # TOPUP_MAX_ADVERSE_DROP below the original fill, the market has moved
+            # against us; only pile in further if the model has actively
+            # STRENGTHENED (strictly above entry), not merely held.
+            adverse_drop = first_fill - entry_price
+            if adverse_drop > settings.TOPUP_MAX_ADVERSE_DROP and current_conviction <= entry_conviction:
+                logger.info(
+                    f"LIVE TOP-UP SKIPPED — averaging down without conviction: "
+                    f"{market.market_id} {signal.direction.upper()} ask "
+                    f"{entry_price:.2%} is {adverse_drop:.2%} below first fill "
+                    f"{first_fill:.2%}; conviction {current_conviction:.0%} "
+                    f"not above entry {entry_conviction:.0%}"
+                )
+                return None
+
+            logger.info(
+                f"LIVE TOP-UP: {market.market_id} {signal.direction.upper()} — "
+                f"{already_working} working, target {target_contracts}, "
+                f"ordering {contracts} more"
+            )
 
         # ── Balance preflight ─────────────────────────────────────────────
         # Guard 1: local — if capped_size can't cover even 1 contract, skip.
@@ -112,6 +216,37 @@ async def log_live_trade(signal) -> Optional[Trade]:
         fill_price_raw = order.get("yes_price") or order.get("fill_price")
         fill_price = (fill_price_raw / 100.0) if fill_price_raw else entry_price
 
+        new_order = {"id": order_id, "price": fill_price, "n": contracts}
+
+        if anchor is not None:
+            # ── Top-up: fold into the existing position row ───────────────────
+            # Blend cost basis by total cost / total contracts. This is exact for
+            # P&L (basis * count reproduces total cost); settlement later
+            # recomputes the basis from each order's ACTUAL fills.
+            prior_cost  = (anchor.contracts or 0) * (anchor.entry_price or 0.0)
+            add_cost    = contracts * fill_price
+            new_total   = (anchor.contracts or 0) + contracts
+
+            anchor.contracts   = new_total
+            anchor.entry_price = round((prior_cost + add_cost) / new_total, 4) if new_total else fill_price
+            anchor.fill_price  = anchor.entry_price
+            anchor.kelly_size  = round((anchor.kelly_size or 0.0) + order_cost, 2)
+            anchor.orders      = json.dumps(_position_orders(anchor) + [new_order])
+            # Refresh signal snapshot to the latest scan that justified the add.
+            anchor.model_prob    = signal.model_probability
+            anchor.market_price  = signal.market_probability
+            anchor.edge          = signal.edge
+            db.commit()
+            db.refresh(anchor)
+
+            anchor.topup_added = contracts   # transient hint for the alert layer
+            logger.info(
+                f"💸 LIVE TOP-UP logged: {market.market_id}  {signal.direction.upper()}  "
+                f"+{contracts} → {new_total} contracts  "
+                f"blended @ {anchor.entry_price:.2%}  order_id={order_id}"
+            )
+            return anchor
+
         trade = Trade(
             is_paper         = False,
             ticker           = market.market_id,
@@ -126,11 +261,12 @@ async def log_live_trade(signal) -> Optional[Trade]:
             market_price     = signal.market_probability,
             edge             = signal.edge,
             confidence       = signal.confidence,
-            kelly_size       = capped_size,
+            kelly_size       = order_cost,   # this order's committed cost (gap only, not full target)
             contracts        = contracts,
             entry_price      = entry_price,
             fill_price       = fill_price,
             kalshi_order_id  = order_id,
+            orders           = json.dumps([new_order]),
             forecast_mean    = signal.ensemble_mean,
             forecast_std     = signal.ensemble_std,
             resolution_date  = market.target_date.isoformat(),
@@ -191,41 +327,56 @@ async def settle_live_trades() -> List[Trade]:
         client = KalshiClient()
 
         for trade in pending:
-            # ── Step 1: check how many contracts filled ────────────────────
-            filled_count = await _check_order_filled(client, trade)
+            # ── Step 1: tally ACTUAL fills across every order in the position ──
+            total_filled, total_resting, undetermined, per_order = \
+                await _position_fill_status(client, trade)
 
-            if filled_count == 0:
-                # Explicitly cancelled/expired with zero fills — no P&L
+            if total_resting > 0:
+                # Some contracts still working — don't settle until they resolve.
+                logger.info(
+                    f"Skipping {trade.ticker} — {total_resting} contract(s) still resting"
+                )
+                continue
+
+            if total_filled == 0 and undetermined == 0:
+                # Every order cancelled/expired with zero fills — no P&L
                 trade.resolved    = True
                 trade.result      = "cancelled"
                 trade.pnl         = 0.0
                 trade.resolved_at = datetime.utcnow()
                 settled.append(trade)
-                logger.info(f"🚫 LIVE CANCELLED: {trade.ticker} — order did not fill")
+                logger.info(f"🚫 LIVE CANCELLED: {trade.ticker} — no order filled")
                 continue
 
             # ── Step 2: fetch the Kalshi market result ─────────────────────
-            # Run this even when fill count is unknown (None) so a
-            # resting-but-resolved market doesn't block settlement indefinitely.
             kalshi_result = await _fetch_kalshi_result(trade.ticker)
 
             if kalshi_result is None:
                 logger.info(f"Skipping {trade.ticker} — Kalshi result not posted yet")
                 continue
 
-            if filled_count is None:
+            # Recompute the blended cost basis from actual fills (ground truth).
+            # per_order already falls back to recorded counts for undetermined
+            # orders, so this is robust to a stray unfetchable order id.
+            cost   = sum(o["filled"] * o["price"] for o in per_order)
+            filled_count = sum(o["filled"] for o in per_order)
+
+            if filled_count == 0:
                 logger.warning(
-                    f"Order fill count unknown for {trade.ticker} "
-                    f"(order_id={trade.kalshi_order_id}) — market resolved "
-                    f"{kalshi_result.upper()}, settling with recorded contract count"
+                    f"{trade.ticker}: no resolvable fills but status not all-cancelled "
+                    f"— settling with recorded contract count {trade.contracts}"
                 )
-                filled_count = trade.contracts
-            elif filled_count != trade.contracts:
-                logger.info(
-                    f"Partial fill for {trade.ticker}: "
-                    f"{filled_count}/{trade.contracts} contracts filled"
-                )
-                trade.contracts = filled_count
+                filled_count = trade.contracts or 0
+            else:
+                basis = cost / filled_count
+                if filled_count != trade.contracts:
+                    logger.info(
+                        f"Fill reconcile for {trade.ticker}: "
+                        f"{filled_count}/{trade.contracts} contracts actually filled, "
+                        f"basis {trade.entry_price:.2%}→{basis:.2%}"
+                    )
+                trade.contracts   = filled_count
+                trade.entry_price = round(basis, 4)
 
             yes_wins = (kalshi_result == "yes")
             we_win = yes_wins if trade.side == "yes" else not yes_wins
@@ -262,18 +413,18 @@ async def settle_live_trades() -> List[Trade]:
     return settled
 
 
-async def _check_order_filled(client, trade) -> Optional[int]:
+async def _fetch_order_fill(client, order_id, fallback_n) -> Optional[Tuple[int, int]]:
     """
-    Returns the number of contracts that actually filled:
-      - Positive int: that many contracts filled (may be less than trade.contracts for partial fills)
-      - 0: order cancelled/expired with no fills
-      - None: order status couldn't be determined
+    Resolve a single Kalshi order to (filled_contracts, resting_contracts), or
+    None if the status couldn't be determined (transient API error / unknown
+    status). `fallback_n` is used when there's no order id, or a 'filled' order
+    reports no count.
     """
-    if not trade.kalshi_order_id:
-        # No order ID recorded — assume fully filled
-        return trade.contracts
+    if not order_id:
+        # No order id recorded — assume the recorded size fully filled.
+        return (fallback_n, 0)
     try:
-        data = await client.get_order(trade.kalshi_order_id)
+        data = await client.get_order(order_id)
         order = data.get("order", data)
         status = order.get("status", "")
 
@@ -288,19 +439,58 @@ async def _check_order_filled(client, trade) -> Optional[int]:
 
         # Kalshi order statuses: "resting", "filled", "canceled"/"cancelled", "expired"
         if status == "filled":
-            return filled_count if filled_count > 0 else trade.contracts
+            return (filled_count if filled_count > 0 else fallback_n, 0)
 
         if status in ("cancelled", "canceled", "expired"):
-            # Could be a partial fill that was then cancelled — return actual fill count
-            return filled_count  # 0 = no fill, positive = partial fill before cancellation
+            # Dead order — any fill is final, nothing left resting.
+            return (filled_count, 0)
 
-        # "resting": order still open; if we have a non-zero fill count from the
-        # API fields it means a partial fill happened so far — but don't settle yet
-        # since remaining contracts are still in play.  Return None to retry later.
+        if status == "resting":
+            # Still open: filled_count may be a partial fill so far; the rest
+            # is still working on the book. Derive the resting amount from the
+            # order's own count so a missing remaining_count field can't make a
+            # live order look fully filled (which would settle it prematurely).
+            resting = max(remaining, count - filled_count)
+            return (filled_count, max(0, resting))
+
+        # Unrecognised status — treat as undetermined.
         return None
     except Exception as e:
-        logger.debug(f"Could not fetch order status for {trade.kalshi_order_id}: {e}")
+        logger.debug(f"Could not fetch order status for {order_id}: {e}")
         return None
+
+
+async def _position_fill_status(client, trade) -> Tuple[int, int, int, List[dict]]:
+    """
+    Aggregate fill status across every order that built a position.
+
+    Returns (total_filled, total_resting, undetermined, per_order):
+      - total_filled:  contracts actually traded across all orders
+      - total_resting: contracts still open on the book (can still fill)
+      - undetermined:  recorded contracts whose status couldn't be fetched
+      - per_order:     [{"price", "filled"} ...] for cost-basis recompute.
+                       Undetermined orders fall back to their recorded count so
+                       settlement can still compute a basis rather than block.
+    """
+    total_filled = total_resting = undetermined = 0
+    per_order: List[dict] = []
+    for o in _position_orders(trade):
+        n     = int(o.get("n", 0) or 0)
+        price = o.get("price")
+        res = await _fetch_order_fill(client, o.get("id"), n)
+        if res is None:
+            # Status unknown — fall back to the recorded fill so the basis math
+            # still works, and flag it so the reconcile path stays conservative.
+            undetermined += n
+            if n > 0 and price is not None:
+                per_order.append({"price": price, "filled": n})
+            continue
+        filled, resting = res
+        total_filled  += filled
+        total_resting += resting
+        if filled > 0 and price is not None:
+            per_order.append({"price": price, "filled": filled})
+    return (total_filled, total_resting, undetermined, per_order)
 
 
 # ── Stats ─────────────────────────────────────────────────────────────────────

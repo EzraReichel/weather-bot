@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     KALSHI_API_BASE_URL: str = "https://api.elections.kalshi.com/trade-api/v2"
     # Hard cap per live order in dollars (set low during initial live testing)
     LIVE_MAX_TRADE_SIZE: float = 5.0
+    # When topping up a partially-filled position on a later scan and our side's
+    # ask has fallen more than this many dollars (0-1 scale, e.g. 0.02 = 2¢)
+    # below the original fill, only add if our model has actively strengthened.
+    # Guards against averaging down into a market that increasingly disagrees
+    # with a possibly-stale model (adverse selection).
+    TOPUP_MAX_ADVERSE_DROP: float = 0.02
 
     # Trading hours
     SAME_DAY_HIGH_CUTOFF_HOUR: int = 9        # stop entering same-day high markets at/after this hour ET

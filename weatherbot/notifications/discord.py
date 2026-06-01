@@ -575,3 +575,43 @@ def send_live_trade_alert(signal, trade) -> bool:
     if success:
         logger.info(f"Discord live trade alert sent: {trade.ticker} {side}")
     return success
+
+
+def send_live_position_increase_alert(signal, trade, added_contracts: int) -> bool:
+    """
+    Send a Discord alert when a top-up increases an existing live position.
+
+    Distinct from send_live_trade_alert: this is a position-increase update, not
+    a brand-new position. Shows how many contracts were added and the new blended
+    cost basis on the consolidated row.
+    """
+    if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    market = signal.market
+    side = signal.direction.upper()
+    blended = trade.entry_price or signal.market_probability
+    prior_contracts = max(0, (trade.contracts or 0) - added_contracts)
+
+    embed = {
+        "title": f"➕ LIVE POSITION INCREASED — {market.market_id}",
+        "color": 0xD4AC0D,  # darker gold — distinct from a fresh order (orange)
+        "fields": [
+            {"name": "Ticker",        "value": f"`{market.market_id}`",                 "inline": True},
+            {"name": "Side",          "value": f"**{side}**",                           "inline": True},
+            {"name": "Edge",          "value": f"**+{abs(signal.edge):.1%}**",          "inline": True},
+            {"name": "Added",         "value": f"+{added_contracts} contracts",         "inline": True},
+            {"name": "Position",      "value": f"{prior_contracts} → {trade.contracts}", "inline": True},
+            {"name": "Blended Basis", "value": f"{blended:.2%}",                        "inline": True},
+            {"name": "Total Cost",    "value": f"${trade.kelly_size:.2f}",              "inline": True},
+            {"name": "City",          "value": market.city_name,                        "inline": True},
+            {"name": "Resolves",      "value": market.target_date.isoformat(),          "inline": True},
+        ],
+        "footer": {"text": "⚠️ LIVE TRADING — real money"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    success = _post_embed(embed)
+    if success:
+        logger.info(f"Discord position-increase alert sent: {trade.ticker} {side} +{added_contracts}")
+    return success

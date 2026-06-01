@@ -11,7 +11,11 @@ engine = create_engine(
     settings.DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
 )
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+# expire_on_commit=False so ORM objects stay readable after their session
+# closes — settle_live_trades/settle_paper_trades return Trade rows that the
+# scheduler reads (result, pnl) post-commit. Without this, the commit expires
+# those attributes and the first read raises DetachedInstanceError.
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, expire_on_commit=False)
 Base = declarative_base()
 
 
