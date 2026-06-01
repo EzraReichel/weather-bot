@@ -9,6 +9,13 @@ const usd = (n, showSign = false) => {
 };
 const pct = (n) => (typeof n === "number" ? (n * 100).toFixed(1) + "%" : "—");
 const edgeDisplay = (t) => t.side === "no" ? Math.abs(t.edge || 0) : (t.edge || 0);
+const fillPct = (t) => {
+  if (!t.resolved) return null;
+  if (t.result === "cancelled") return 0;
+  if (!t.kelly_size || !t.entry_price) return 1.0;
+  const requested = Math.max(1, Math.floor(t.kelly_size / t.entry_price));
+  return t.contracts / requested;
+};
 
 const CITY_SHORT = {
   nyc: "NYC", chicago: "CHI", miami: "MIA", los_angeles: "LAX",
@@ -236,6 +243,7 @@ function TradesView({ trades }) {
               <th style={S.th}>Market</th>
               <th style={S.th}>Side</th>
               <th style={S.th}>Size</th>
+              <th style={S.th}>Fill</th>
               <th style={S.th}>Edge</th>
               <th style={S.th}>Model prob</th>
               <th style={S.th}>Outcome</th>
@@ -246,7 +254,7 @@ function TradesView({ trades }) {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={8} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                <td colSpan={9} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
                   {trades.length === 0 ? "No trades placed yet." : "No trades match your search."}
                 </td>
               </tr>
@@ -292,6 +300,9 @@ function TradeRow({ trade: t }) {
           ? <>{usd(t.contracts * t.entry_price)}<span style={{ color: C.subtle }}> &times;{t.contracts}</span></>
           : "—"}
       </td>
+      <td style={{ ...S.td, fontSize: 12, color: (() => { const f = fillPct(t); return f === null ? C.subtle : f < 1.0 ? C.amber : C.subtle; })() }}>
+        {(() => { const f = fillPct(t); return f === null ? "—" : pct(f); })()}
+      </td>
       <td style={{ ...S.td, color: edgeDisplay(t) >= 0.1 ? C.green : C.text }}>
         {pct(edgeDisplay(t))}
       </td>
@@ -330,6 +341,7 @@ function PaperTradesView({ trades }) {
               <th style={S.th}>Market</th>
               <th style={S.th}>Side</th>
               <th style={S.th}>Size</th>
+              <th style={S.th}>Fill</th>
               <th style={S.th}>Edge</th>
               <th style={S.th}>Model prob</th>
               <th style={S.th}>Outcome</th>
@@ -340,7 +352,7 @@ function PaperTradesView({ trades }) {
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td colSpan={8} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                <td colSpan={9} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
                   No paper trades found.
                 </td>
               </tr>
