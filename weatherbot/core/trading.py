@@ -72,7 +72,10 @@ async def log_live_trade(signal) -> Optional[Trade]:
 
     capped_size = min(signal.suggested_size, settings.LIVE_MAX_TRADE_SIZE)
     target_contracts = max(1, int(capped_size / entry_price))
-    yes_price_cents = round(market.yes_price * 100)  # always YES-side price per Kalshi API
+    # Limit price for the side we're actually buying: entry_price is already the
+    # YES ask for YES orders and the NO ask for NO orders. Sending the YES ask on
+    # a NO order would imply a NO limit a full spread too low → never fills.
+    limit_price_cents = round(entry_price * 100)
 
     db = SessionLocal()
     try:
@@ -93,20 +96,24 @@ async def log_live_trade(signal) -> Optional[Trade]:
             Trade.side == signal.direction,
         ).all()
 
-        # A market+side has at most one open position row now (top-ups fold into
-        # it), but query defensively in case legacy data has several.
-        already_working = 0
-        for ex in existing:
-            filled, resting, undetermined, _ = await _position_fill_status(client, ex)
-            # Undetermined orders count as working so a transient API hiccup
-            # never makes us double-order.
-            already_working += filled + resting + undetermined
+        # Cap on CUMULATIVE contracts ORDERED for this position — read from the
+        # DB, NOT from live fill status. This is critical: a cancelled or
+        # unfilled order must never free up budget to re-buy. If we measured
+        # "currently filled + resting" instead, then every time Kalshi cancels a
+        # resting order the count collapses toward zero, the position looks
+        # "under goal" again, and the bot re-orders the full target on the next
+        # scan — an unbounded re-buy loop (this is exactly what blew a position
+        # up to 395 contracts / $209 across 13 orders).
+        #
+        # We do NOT retry/replace cancelled or partially-unfilled orders by
+        # design: order up to the target once, cumulatively, and never exceed it.
+        already_ordered = sum(ex.contracts or 0 for ex in existing)
 
-        contracts = target_contracts - already_working
+        contracts = target_contracts - already_ordered
         if contracts <= 0:
             logger.debug(
                 f"Live top-up skipped: {market.market_id} — "
-                f"{already_working} contracts already working ≥ target {target_contracts}"
+                f"{already_ordered} contracts already ordered ≥ target {target_contracts}"
             )
             return None
 
@@ -160,7 +167,7 @@ async def log_live_trade(signal) -> Optional[Trade]:
 
             logger.info(
                 f"LIVE TOP-UP: {market.market_id} {signal.direction.upper()} — "
-                f"{already_working} working, target {target_contracts}, "
+                f"{already_ordered} already ordered, target {target_contracts}, "
                 f"ordering {contracts} more"
             )
 
@@ -204,16 +211,31 @@ async def log_live_trade(signal) -> Optional[Trade]:
             f"(capped ${capped_size:.2f} of ${signal.suggested_size:.2f} Kelly)"
         )
 
-        result = await client.place_order(
-            ticker=market.market_id,
-            side=signal.direction,
-            count=contracts,
-            yes_price=yes_price_cents,
-        )
+        if signal.direction == "no":
+            result = await client.place_order(
+                ticker=market.market_id, side="no",
+                count=contracts, no_price=limit_price_cents,
+            )
+        else:
+            result = await client.place_order(
+                ticker=market.market_id, side="yes",
+                count=contracts, yes_price=limit_price_cents,
+            )
 
         order = result.get("order", result)
         order_id = order.get("id") or order.get("order_id")
-        fill_price_raw = order.get("yes_price") or order.get("fill_price")
+        # Kalshi reports the fill price on the side traded. For a NO order use
+        # no_price; fall back to converting yes_price. Default to entry on miss.
+        if signal.direction == "no":
+            fill_price_raw = order.get("no_price")
+            if fill_price_raw is None and order.get("yes_price") is not None:
+                fill_price_raw = 100 - order["yes_price"]
+        else:
+            fill_price_raw = order.get("yes_price")
+            if fill_price_raw is None and order.get("no_price") is not None:
+                fill_price_raw = 100 - order["no_price"]
+        if fill_price_raw is None:
+            fill_price_raw = order.get("fill_price")
         fill_price = (fill_price_raw / 100.0) if fill_price_raw else entry_price
 
         new_order = {"id": order_id, "price": fill_price, "n": contracts}
@@ -306,7 +328,8 @@ async def settle_live_trades() -> List[Trade]:
     Filled orders are settled via the Kalshi market result.
     """
     init_trade_db()
-    today = date.today()
+    from weatherbot.data.weather import et_today
+    today = et_today()   # ET, not UTC — markets resolve on the local ET day
     settled = []
 
     db = SessionLocal()

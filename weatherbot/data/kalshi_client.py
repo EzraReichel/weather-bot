@@ -139,20 +139,41 @@ class KalshiClient:
         return await self.get("/portfolio/balance")
 
     async def place_order(
-        self, ticker: str, side: str, count: int, yes_price: int
+        self, ticker: str, side: str, count: int,
+        yes_price: Optional[int] = None, no_price: Optional[int] = None,
     ) -> dict:
         """
-        Place a limit order. side: 'yes' or 'no'. yes_price: cents (e.g. 65 = $0.65).
+        Place a limit order. side: 'yes' or 'no'. Prices in cents (e.g. 65 = $0.65).
+
+        Kalshi prices the limit on the side being bought: a YES buy uses yes_price,
+        a NO buy uses no_price. Passing yes_price for a NO order makes Kalshi imply
+        a NO limit of (100 - yes_price), which sits a full spread below the real NO
+        ask and never crosses — so always send the price for the side you're buying.
+
+        For convenience, if only yes_price is given on a NO order we convert it to
+        the equivalent no_price (100 - yes_price).
         Returns the full API response dict (contains 'order' key with order details).
         """
-        return await self._post("/portfolio/orders", {
+        body = {
             "ticker": ticker,
             "action": "buy",
             "side": side,
             "count": count,
             "type": "limit",
-            "yes_price": yes_price,
-        })
+        }
+        if side == "no":
+            if no_price is None:
+                if yes_price is None:
+                    raise ValueError("NO order requires no_price (or yes_price to convert)")
+                no_price = 100 - yes_price
+            body["no_price"] = no_price
+        else:
+            if yes_price is None:
+                if no_price is None:
+                    raise ValueError("YES order requires yes_price (or no_price to convert)")
+                yes_price = 100 - no_price
+            body["yes_price"] = yes_price
+        return await self._post("/portfolio/orders", body)
 
     async def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by ID."""

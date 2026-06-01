@@ -87,6 +87,19 @@ def _celsius_to_fahrenheit(c: float) -> float:
     return c * 9.0 / 5.0 + 32.0
 
 
+def et_today() -> date:
+    """
+    Today's date in US Eastern time.
+
+    Kalshi weather markets resolve on the local (ET) calendar day. The host
+    (Render) runs in UTC, where date.today() rolls over to tomorrow at ~7-8 PM
+    ET — which would pull next-day-ET markets into settlement ~a day early.
+    Always gate settlement on this, not date.today().
+    """
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/New_York")).date()
+
+
 async def fetch_ensemble_forecast(city_key: str, target_date: Optional[date] = None) -> Optional[EnsembleForecast]:
     """
     Fetch ensemble forecast from Open-Meteo Ensemble API (free, 31-member GFS).

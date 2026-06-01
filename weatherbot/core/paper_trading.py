@@ -172,7 +172,8 @@ async def settle_paper_trades() -> List[Trade]:
     Returns list of newly settled trades.
     """
     _ensure_db()
-    today = date.today()
+    from weatherbot.data.weather import et_today
+    today = et_today()   # ET, not UTC — markets resolve on the local ET day
     settled = []
 
     db = SessionLocal()
