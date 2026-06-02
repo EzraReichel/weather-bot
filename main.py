@@ -148,6 +148,11 @@ async def api_trades(limit: int = 2000):
         sql = _all_trades_sql(has_paper, order="created_at DESC", limit=limit, live_only=True)
         rows = db.execute(text(sql)).fetchall()
         trades = _rows_to_trades(rows)
+        # Cancelled orders never filled (zero P&L, no real position) — hide them
+        # so the dashboard reflects only trades that actually transacted. Common
+        # cause of dupes: a runaway re-buy that places several orders for one
+        # position, most of which cancel unfilled.
+        trades = [t for t in trades if t.get("result") != "cancelled"]
         return {"trades": trades, "total": len(trades)}
     finally:
         db.close()
@@ -192,6 +197,8 @@ async def api_bankroll():
         cumulative = initial
         points = [{"t": None, "bankroll": initial}]
         for t in all_trades:
+            if t["result"] == "cancelled":
+                continue  # never filled — no bankroll impact, skip the flat point
             if t["resolved"] and t["pnl"] is not None and t["resolved_at"]:
                 cumulative += t["pnl"]
                 points.append({

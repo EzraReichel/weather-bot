@@ -83,15 +83,27 @@ async def log_live_trade(signal) -> Optional[Trade]:
         from weatherbot.notifications.discord import send_live_order_failed_alert
         client = KalshiClient()
 
-        # Dedup: one order per market at a time.
+        # Dedup: one attempt per market, ever. The ticker is date+threshold
+        # specific (e.g. KXHIGHDEN-26JUN02-T79), so a prior row for this ticker
+        # means we already acted on this exact market today.
+        #
+        # We intentionally match resolved rows too. A cancelled/unfilled attempt
+        # is resolved=True; checking only resolved==False let a manual cancel (or
+        # an expired order) clear the guard, so the next scan re-bought — placing
+        # a ladder of orders for one position (the "runaway re-buy"). Blocking on
+        # any existing row for the ticker stops that: if the first attempt
+        # cancels, we don't retry the same market the same day.
         # Top-up logic is disabled; it is being rebuilt against a backtest DB.
         existing = db.query(Trade).filter(
             Trade.ticker == market.market_id,
             Trade.is_paper == False,
-            Trade.resolved == False,
         ).first()
         if existing:
-            logger.debug(f"Live dedup skipped: {market.market_id} (open position exists)")
+            logger.debug(
+                f"Live dedup skipped: {market.market_id} "
+                f"(already attempted — existing trade id={existing.id}, "
+                f"resolved={existing.resolved}, result={existing.result})"
+            )
             return None
 
         contracts = target_contracts
@@ -233,7 +245,9 @@ async def settle_live_trades() -> List[Trade]:
         pending = db.query(Trade).filter(
             Trade.is_paper == False,
             Trade.resolved == False,
-            Trade.resolution_date <= today.isoformat(),
+            # Strictly before today (ET): a market resolving *today* doesn't
+            # settle until 11:59 PM ET, so it isn't eligible yet.
+            Trade.resolution_date < today.isoformat(),
         ).all()
 
         if not pending:
@@ -374,6 +388,9 @@ async def settle_live_trades() -> List[Trade]:
     except Exception as e:
         logger.error(f"Live trade settlement error: {e}", exc_info=True)
         db.rollback()
+        # The batch rolled back — nothing persisted, so surface nothing.
+        # Settling (and notifying) retries cleanly next cycle.
+        return []
     finally:
         db.close()
 
