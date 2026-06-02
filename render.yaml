@@ -27,8 +27,10 @@ services:
         value: "1000.0"
       - key: KELLY_FRACTION
         value: "0.15"
+      - key: KELLY_USE_EQUITY
+        value: "false"
       - key: SCAN_INTERVAL_SECONDS
-        value: "30"
+        value: "300"
       - key: MIN_EDGE_THRESHOLD
         value: "0.08"
       - key: KALSHI_FEE_RATE
@@ -36,9 +38,9 @@ services:
       - key: WEATHER_MAX_TRADE_SIZE
         value: "100.0"
       - key: LIVE_MAX_TRADE_SIZE
-        value: "5.0"
+        value: "100"
       - key: LIVE_TRADING
-        value: "false"
+        value: "true"
 
       - key: KALSHI_API_BASE_URL
         value: "https://api.elections.kalshi.com/trade-api/v2"
