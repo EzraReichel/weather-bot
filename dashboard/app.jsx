@@ -9,12 +9,17 @@ const usd = (n, showSign = false) => {
 };
 const pct = (n) => (typeof n === "number" ? (n * 100).toFixed(1) + "%" : "—");
 const edgeDisplay = (t) => t.side === "no" ? Math.abs(t.edge || 0) : (t.edge || 0);
+// Fraction of the Kelly TARGET that actually filled by resolution. After
+// settlement `contracts` holds contracts actually filled, so this is
+// filled / target. Falls back to the ordered-cost estimate for legacy rows
+// that predate the target_contracts column.
 const fillPct = (t) => {
   if (!t.resolved) return null;
   if (t.result === "cancelled") return 0;
-  if (!t.kelly_size || !t.entry_price) return 1.0;
-  const requested = Math.max(1, Math.floor(t.kelly_size / t.entry_price));
-  return t.contracts / requested;
+  const target = t.target_contracts
+    || (t.kelly_size && t.entry_price ? Math.max(1, Math.floor(t.kelly_size / t.entry_price)) : null);
+  if (!target) return 1.0;
+  return Math.min(1, (t.contracts || 0) / target);
 };
 
 const CITY_SHORT = {

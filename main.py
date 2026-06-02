@@ -93,21 +93,25 @@ def _all_trades_sql(has_paper: bool, order: str = "created_at DESC", limit: int 
         "model_prob, market_price, edge, contracts, entry_price, kelly_size, "
         "created_at, resolution_date, resolved, result, pnl, actual_temp, resolved_at"
     )
+    # The current `trades` table has target_contracts; the legacy `paper_trades`
+    # table does not — select NULL there so the UNION columns line up.
+    trades_sel = f"{fields}, target_contracts"
+    paper_sel  = f"{fields}, NULL AS target_contracts"
 
     if live_only:
-        return f"SELECT {fields}, is_paper FROM trades WHERE NOT is_paper ORDER BY {order} LIMIT {limit}"
+        return f"SELECT {trades_sel}, is_paper FROM trades WHERE NOT is_paper ORDER BY {order} LIMIT {limit}"
 
     if paper_only:
-        live_paper_q = f"SELECT {fields}, is_paper FROM trades WHERE is_paper"
+        live_paper_q = f"SELECT {trades_sel}, is_paper FROM trades WHERE is_paper"
         if has_paper:
-            paper_q = f"SELECT {fields}, TRUE AS is_paper FROM paper_trades"
+            paper_q = f"SELECT {paper_sel}, TRUE AS is_paper FROM paper_trades"
             return f"SELECT * FROM ({paper_q} UNION ALL {live_paper_q}) t ORDER BY {order} LIMIT {limit}"
         return f"{live_paper_q} ORDER BY {order} LIMIT {limit}"
 
     # default: all trades
-    trades_q = f"SELECT {fields}, is_paper FROM trades"
+    trades_q = f"SELECT {trades_sel}, is_paper FROM trades"
     if has_paper:
-        paper_q = f"SELECT {fields}, TRUE AS is_paper FROM paper_trades"
+        paper_q = f"SELECT {paper_sel}, TRUE AS is_paper FROM paper_trades"
         return f"SELECT * FROM ({paper_q} UNION ALL {trades_q}) t ORDER BY {order} LIMIT {limit}"
     return f"{trades_q} ORDER BY {order} LIMIT {limit}"
 
@@ -117,7 +121,7 @@ def _rows_to_trades(rows) -> list:
         "id", "ticker", "city", "metric", "threshold_f", "side", "market_direction",
         "model_prob", "market_price", "edge", "contracts", "entry_price", "kelly_size",
         "created_at", "resolution_date", "resolved", "result", "pnl", "actual_temp",
-        "resolved_at", "is_paper",
+        "resolved_at", "target_contracts", "is_paper",
     ]
     out = []
     for row in rows:

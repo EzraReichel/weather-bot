@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from weatherbot.config import settings
 from weatherbot.core.paper_trading import get_paper_stats
-from weatherbot.core.trade_manager import execute_signal, settle_trades
+from weatherbot.core.trade_manager import execute_signal, settle_trades, notify_pending_settlements
 from weatherbot.core.trading import get_live_stats
 from weatherbot.core.weather_signals import scan_for_weather_signals
 from weatherbot.data.kalshi_client import fetch_live_balance
@@ -65,6 +65,13 @@ async def weather_scan_job():
 
             if trade is None:
                 continue   # dedup or error — no alert
+
+            # Top-ups are silent: a top-up folds into the existing position row
+            # and carries a transient `topup_added` hint. We don't alert on adds
+            # — the dashboard fill % shows how much of the Kelly target filled by
+            # resolution, which is all we care to track.
+            if getattr(trade, "topup_added", None):
+                continue
 
             last_alerted = _alerted_tickers.get(ticker)
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
@@ -119,12 +126,11 @@ async def settlement_job():
                 f"Trades settled: {len(settled)} ({wins}W/{losses}L/{cancelled} cancelled)  "
                 f"P&L ${pnl:+.2f}"
             )
-            bankroll = await fetch_live_balance()
-            for t in settled:
-                try:
-                    send_trade_settled_alert(t, bankroll=bankroll)
-                except Exception as e:
-                    logger.error(f"Failed to send settlement alert for {t.ticker}: {e}")
+
+        # Notify off the DB (resolved & not-yet-notified), not off `settled`, so
+        # an alert is sent exactly once even across rollbacks/restarts.
+        bankroll = await fetch_live_balance()
+        notify_pending_settlements(lambda t: send_trade_settled_alert(t, bankroll=bankroll))
     except Exception as e:
         logger.error(f"Settlement error: {e}", exc_info=True)
 

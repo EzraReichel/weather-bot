@@ -47,10 +47,18 @@ class Settings(BaseSettings):
     # Guards against averaging down into a market that increasingly disagrees
     # with a possibly-stale model (adverse selection).
     TOPUP_MAX_ADVERSE_DROP: float = 0.02
+    # Circuit breaker: max number of physical orders allowed per position
+    # (original order + top-ups). Caps the order ladder so a thin book that
+    # only fills a few contracts per scan can't spawn dozens of tiny adds.
+    TOPUP_MAX_ORDERS: int = 4
 
     # Trading hours
     SAME_DAY_HIGH_CUTOFF_HOUR: int = 9        # stop entering same-day high markets at/after this hour ET
-    SAME_DAY_LOW_CUTOFF_HOUR: int = 7         # stop entering same-day low markets at/after this hour ET
+    # LOW cutoff is in each city's LOCAL time (not ET) — the daily low prints near
+    # local dawn, so an ET cutoff blocked western cities pre-event and threw away
+    # the profitable morning window. Loosened 7→10 local: still blocks clearly
+    # post-event afternoon entries while keeping the low metric's best trades.
+    SAME_DAY_LOW_CUTOFF_HOUR: int = 10        # stop entering same-day low markets at/after this hour LOCAL
     TRADING_HOURS_CONVICTION_THRESHOLD: float = 0.75  # bypass all time gates when both model AND market >= this
 
     # Backtest data capture — snapshot every scan into the bt_* archive tables.

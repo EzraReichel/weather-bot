@@ -46,13 +46,13 @@ async def log_live_trade(signal) -> Optional[Trade]:
     """
     Place a real Kalshi order and record it as a live Trade (is_paper=False).
 
-    Reconciles against any existing open orders for the same market+side: only
-    the gap between contracts already working (filled + resting) and the Kelly
-    target is ordered, so partial fills get topped up on later scans instead of
-    being left stuck below target until settlement.
+    Tops up a partially-filled position toward the Kelly target on later scans,
+    folding each add into one position row — but never re-buys a position that
+    has already closed out. See the reconciliation block below for the exact
+    cases and the runaway guard.
 
-    Returns the new Trade row, or None if skipped (already at target, error,
-    zero price).
+    Returns the Trade row (new or topped-up), or None if skipped (at target,
+    closed already, opposing side open, guard tripped, error, zero price).
     """
     init_trade_db()
 
@@ -83,30 +83,131 @@ async def log_live_trade(signal) -> Optional[Trade]:
         from weatherbot.notifications.discord import send_live_order_failed_alert
         client = KalshiClient()
 
-        # Dedup: one attempt per market, ever. The ticker is date+threshold
-        # specific (e.g. KXHIGHDEN-26JUN02-T79), so a prior row for this ticker
-        # means we already acted on this exact market today.
+        # ── Reconcile against existing rows for this market ───────────────────
+        # The ticker is date+threshold specific (e.g. KXHIGHDEN-26JUN02-T79), so
+        # every row here is the SAME market today. Three cases:
         #
-        # We intentionally match resolved rows too. A cancelled/unfilled attempt
-        # is resolved=True; checking only resolved==False let a manual cancel (or
-        # an expired order) clear the guard, so the next scan re-bought — placing
-        # a ladder of orders for one position (the "runaway re-buy"). Blocking on
-        # any existing row for the ticker stops that: if the first attempt
-        # cancels, we don't retry the same market the same day.
-        # Top-up logic is disabled; it is being rebuilt against a backtest DB.
-        existing = db.query(Trade).filter(
+        #   • Open position on our side  → TOP-UP: order only the remaining gap
+        #     to the Kelly target and fold it into that row.
+        #   • Only CLOSED rows on our side (filled-and-settled OR cancelled) →
+        #     the day's attempt already ended; do NOT re-enter. Re-buying a
+        #     market whose order cancelled is the original "runaway re-buy".
+        #   • Open position on the OPPOSITE side → skip; never hold both sides.
+        rows = db.query(Trade).filter(
             Trade.ticker == market.market_id,
             Trade.is_paper == False,
-        ).first()
-        if existing:
+        ).order_by(Trade.created_at).all()
+        open_rows = [r for r in rows if not r.resolved]
+
+        if any(r.side != signal.direction for r in open_rows):
             logger.debug(
-                f"Live dedup skipped: {market.market_id} "
-                f"(already attempted — existing trade id={existing.id}, "
-                f"resolved={existing.resolved}, result={existing.result})"
+                f"Live skip: {market.market_id} — open opposite-side position; "
+                f"signal is {signal.direction}, not opening a conflicting side"
             )
             return None
 
-        contracts = target_contracts
+        same_side      = [r for r in rows if r.side == signal.direction]
+        same_side_open = [r for r in open_rows if r.side == signal.direction]
+
+        if same_side and not same_side_open:
+            logger.debug(
+                f"Live skip: {market.market_id} {signal.direction} — prior "
+                f"attempt(s) already closed ({len(same_side)} row(s)); not "
+                f"re-entering the same market today"
+            )
+            return None
+
+        anchor = same_side_open[0] if same_side_open else None
+
+        if anchor is None:
+            # Fresh entry — order the full Kelly target.
+            contracts = target_contracts
+        else:
+            # ── TOP-UP — fill-aware, self-bounding, with a circuit breaker ────
+            # Refill toward the Kelly target based on what's ACTUALLY working on
+            # Kalshi: filled + still-resting + undetermined. The gap below is
+            # `target - working`, which is INHERENTLY self-bounding — contracts
+            # filled can never exceed the target, because a cancelled resting
+            # order reopens only its own unfilled remainder, never the whole
+            # target. So a partial fill climbs to target over later scans without
+            # ever over-buying.
+            #
+            # Why this is safe where the original (395-contract) blowup was not:
+            # that version under-counted `working` — a cancelled resting order
+            # collapsed the count toward zero, so the gap reopened to the FULL
+            # target every scan and it re-bought repeatedly. Two things prevent
+            # that here:
+            #   • `undetermined` (status-fetch failures) counts as working, so a
+            #     transient API error can never make the position look empty and
+            #     trigger a re-buy.
+            #   • TOPUP_MAX_ORDERS is a hard circuit breaker on ladder length —
+            #     even if fill status were ever misread, the order ladder cannot
+            #     grow past N, capping worst-case exposure instead of spiraling.
+            filled, resting, undetermined, _ = await _position_fill_status(client, anchor)
+            working  = filled + resting + undetermined
+            n_orders = sum(len(_position_orders(r)) for r in same_side_open)
+
+            # Hard circuit breaker — at most TOPUP_MAX_ORDERS orders per position.
+            if n_orders >= settings.TOPUP_MAX_ORDERS:
+                logger.info(
+                    f"LIVE TOP-UP SKIPPED — order cap: {market.market_id} "
+                    f"{signal.direction.upper()} has {n_orders} orders "
+                    f"(max {settings.TOPUP_MAX_ORDERS})"
+                )
+                return None
+
+            # Self-bounding fill gap. Also clamp to the Kelly dollar cap as a
+            # belt-and-suspenders ceiling (target_contracts already derives from
+            # capped_size, so this only bites if the price moved against us).
+            gap = target_contracts - working
+            gap = min(gap, int(capped_size / entry_price) - working)
+            if gap <= 0:
+                logger.debug(
+                    f"Live top-up skipped: {market.market_id} — working={working} "
+                    f"≥ target={target_contracts} (or Kelly $ ceiling reached)"
+                )
+                return None
+
+            # ── Conviction guards (adds only) ─────────────────────────────────
+            first_fill = anchor.fill_price or anchor.entry_price
+
+            def _our_conviction(p_yes: float) -> float:
+                # Confidence in the side we actually hold (0..1).
+                return p_yes if signal.direction == "yes" else 1.0 - p_yes
+
+            entry_conviction   = _our_conviction(anchor.model_prob or 0.0)
+            current_conviction = _our_conviction(signal.model_probability)
+
+            # Guard A — don't add if our own conviction has weakened since entry,
+            # even if a stale edge still clears threshold.
+            if current_conviction < entry_conviction:
+                logger.info(
+                    f"LIVE TOP-UP SKIPPED — model weakened: {market.market_id} "
+                    f"{signal.direction.upper()} conviction {current_conviction:.0%} "
+                    f"< entry {entry_conviction:.0%}"
+                )
+                return None
+
+            # Guard B — averaging down. If our ask fell more than
+            # TOPUP_MAX_ADVERSE_DROP below the first fill, only add if the model
+            # has actively STRENGTHENED (strictly above entry), not merely held.
+            adverse_drop = first_fill - entry_price
+            if adverse_drop > settings.TOPUP_MAX_ADVERSE_DROP and current_conviction <= entry_conviction:
+                logger.info(
+                    f"LIVE TOP-UP SKIPPED — averaging down without conviction: "
+                    f"{market.market_id} {signal.direction.upper()} ask "
+                    f"{entry_price:.2%} is {adverse_drop:.2%} below first fill "
+                    f"{first_fill:.2%}; conviction {current_conviction:.0%} not "
+                    f"above entry {entry_conviction:.0%}"
+                )
+                return None
+
+            contracts = gap
+            logger.info(
+                f"LIVE TOP-UP: {market.market_id} {signal.direction.upper()} — "
+                f"working {working}/{target_contracts} (filled {filled}, resting "
+                f"{resting}, undet {undetermined}), ordering {contracts} more"
+            )
 
         # ── Balance preflight ─────────────────────────────────────────────
         # Guard 1: local — if capped_size can't cover even 1 contract, skip.
@@ -177,6 +278,38 @@ async def log_live_trade(signal) -> Optional[Trade]:
 
         new_order = {"id": order_id, "price": fill_price, "n": contracts}
 
+        if anchor is not None:
+            # ── Top-up: fold into the existing position row ───────────────────
+            # Blend cost basis by total cost / total contracts. Exact for P&L
+            # (basis × count reproduces total cost); settlement later recomputes
+            # the basis from each order's ACTUAL fills.
+            prior_cost = (anchor.contracts or 0) * (anchor.entry_price or 0.0)
+            add_cost   = contracts * fill_price
+            new_total  = (anchor.contracts or 0) + contracts
+
+            anchor.contracts   = new_total
+            anchor.entry_price = round((prior_cost + add_cost) / new_total, 4) if new_total else fill_price
+            anchor.fill_price  = anchor.entry_price
+            anchor.kelly_size  = round((anchor.kelly_size or 0.0) + order_cost, 2)
+            anchor.orders      = json.dumps(_position_orders(anchor) + [new_order])
+            # Track the high-water Kelly target so fill % is measured against the
+            # largest size this position ever pursued.
+            anchor.target_contracts = max(anchor.target_contracts or 0, target_contracts)
+            # Refresh the signal snapshot to the scan that justified the add.
+            anchor.model_prob   = signal.model_probability
+            anchor.market_price = signal.market_probability
+            anchor.edge         = signal.edge
+            db.commit()
+            db.refresh(anchor)
+
+            anchor.topup_added = contracts   # transient hint for the alert layer
+            logger.info(
+                f"💸 LIVE TOP-UP logged: {market.market_id}  {signal.direction.upper()}  "
+                f"+{contracts} → {new_total} contracts  "
+                f"blended @ {anchor.entry_price:.2%}  order_id={order_id}"
+            )
+            return anchor
+
         trade = Trade(
             is_paper         = False,
             ticker           = market.market_id,
@@ -193,12 +326,14 @@ async def log_live_trade(signal) -> Optional[Trade]:
             confidence       = signal.confidence,
             kelly_size       = order_cost,   # this order's committed cost (gap only, not full target)
             contracts        = contracts,
+            target_contracts = target_contracts,   # Kelly target to fill; fill % measures against this
             entry_price      = entry_price,
             fill_price       = fill_price,
             kalshi_order_id  = order_id,
             orders           = json.dumps([new_order]),
             forecast_mean    = signal.ensemble_mean,
             forecast_std     = signal.ensemble_std,
+            model_data_age_hours = getattr(signal, "model_data_age_hours", None),
             resolution_date  = market.target_date.isoformat(),
             resolved         = False,
         )

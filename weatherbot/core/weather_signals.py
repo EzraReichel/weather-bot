@@ -74,6 +74,10 @@ class WeatherTradingSignal:
     sources_used: List[str] = field(default_factory=list)
     outlier_dampened: Optional[str] = None   # model name if outlier dampening was applied
 
+    # Hours since the most recent model run at entry (staleness proxy). Persisted
+    # on the trade so the staleness gate can be evaluated against realized P&L.
+    model_data_age_hours: Optional[float] = None
+
     # Set after scan — populated for signals that didn't pass threshold
     filter_reason: str = ""   # "low_agreement", "below_edge", "entry_price"
 
@@ -91,22 +95,13 @@ class WeatherTradingSignal:
         return abs(self.edge) >= edge_threshold
 
 
-def _trading_hours_filter(market: WeatherMarket) -> Optional[str]:
+def _model_data_age_hours(now_et: datetime) -> float:
+    """Hours since the most recent scheduled model run (03:30/09:30/15:30/21:30 ET).
+
+    This is the staleness proxy: between runs the market's real-time orderbook may
+    be more informed than our last model output. Persisted on each trade so the
+    staleness gate's threshold can be evaluated against realized P&L.
     """
-    Returns a reason string if this market should be skipped due to model data staleness,
-    or None if the data is fresh enough to trade.
-
-    Skips if the last model run (03:30/09:30/15:30/21:30 ET) was >MODEL_DATA_MAX_AGE_HOURS ago.
-    Between runs the market's real-time orderbook may be more informed than our stale model.
-
-    Same-day event proximity is checked separately in generate_weather_signal after
-    probabilities are computed.
-    """
-    from zoneinfo import ZoneInfo
-    ET = ZoneInfo("America/New_York")
-    now_et = datetime.now(ET)
-
-    # Gate 1: model data freshness
     min_hours_since_run = float("inf")
     for h, m in MODEL_RUN_HOURS_ET:
         run_dt = now_et.replace(hour=h, minute=m, second=0, microsecond=0)
@@ -114,11 +109,7 @@ def _trading_hours_filter(market: WeatherMarket) -> Optional[str]:
             run_dt -= timedelta(days=1)
         hours_since = (now_et - run_dt).total_seconds() / 3600.0
         min_hours_since_run = min(min_hours_since_run, hours_since)
-
-    if min_hours_since_run > MODEL_DATA_MAX_AGE_HOURS:
-        return f"stale_model_data ({min_hours_since_run:.1f}h since last run, max {MODEL_DATA_MAX_AGE_HOURS:.0f}h)"
-
-    return None
+    return min_hours_since_run
 
 
 async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional[float] = None) -> Optional[WeatherTradingSignal]:
@@ -453,6 +444,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     # in the same direction, the signal is allowed regardless of time.
     from zoneinfo import ZoneInfo as _ZI
     _now_et = datetime.now(_ZI("America/New_York"))
+    _data_age_hours = _model_data_age_hours(_now_et)
     _thresh = settings.TRADING_HOURS_CONVICTION_THRESHOLD
     _high_conviction = (
         # YES direction: model >= thresh+10%, market >= thresh (model leads by ≥10%)
@@ -462,19 +454,33 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     )
 
     # Gate 1: model data staleness
-    _stale_reason = _trading_hours_filter(market)
-    if _stale_reason and not _high_conviction:
-        logger.debug(f"SKIP {market.market_id}: {_stale_reason}")
+    if _data_age_hours > MODEL_DATA_MAX_AGE_HOURS and not _high_conviction:
+        logger.debug(
+            f"SKIP {market.market_id}: stale_model_data "
+            f"({_data_age_hours:.1f}h since last run, max {MODEL_DATA_MAX_AGE_HOURS:.0f}h)"
+        )
         return None
 
-    # Gate 2: same-day event proximity
-    if market.metric in ("high", "low") and market.target_date == _now_et.date():
-        _cutoff = (settings.SAME_DAY_HIGH_CUTOFF_HOUR if market.metric == "high"
-                   else settings.SAME_DAY_LOW_CUTOFF_HOUR)
-        if _now_et.hour >= _cutoff and not _high_conviction:
+    # Gate 2: same-day event proximity.
+    # Highs use an ET cutoff (validated: same-day highs entered late reliably lose).
+    # Lows use the city's LOCAL time — the daily low prints near local dawn, so a
+    # fixed ET hour wrongly blocked western cities before their low even occurred
+    # (and those late-ET low entries were in fact profitable). "Same-day" is judged
+    # in whatever frame the cutoff uses so the date and hour stay consistent.
+    if market.metric in ("high", "low") and not _high_conviction:
+        if market.metric == "high":
+            _gate_now = _now_et
+            _cutoff = settings.SAME_DAY_HIGH_CUTOFF_HOUR
+            _frame = "ET"
+        else:
+            from weatherbot.data.weather import get_city_timezone
+            _gate_now = datetime.now(_ZI(get_city_timezone(market.city_key)))
+            _cutoff = settings.SAME_DAY_LOW_CUTOFF_HOUR
+            _frame = "local"
+        if market.target_date == _gate_now.date() and _gate_now.hour >= _cutoff:
             logger.debug(
                 f"SKIP {market.market_id}: same_day_{market.metric}_cutoff "
-                f"(past {_cutoff:02d}:00 ET, model={model_yes_prob:.0%} market={market_yes_prob:.0%})"
+                f"(past {_cutoff:02d}:00 {_frame}, model={model_yes_prob:.0%} market={market_yes_prob:.0%})"
             )
             return None
 
@@ -574,6 +580,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
         agreement=agreement,
         sources_used=sources_used,
         outlier_dampened=multi_result.outlier_dampened if multi_result else None,
+        model_data_age_hours=_data_age_hours,
         filter_reason=(
             "cold_day_exception" if cold_day_exception and not entry_price_filtered
             else "entry_price" if entry_price_filtered

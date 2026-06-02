@@ -19,6 +19,55 @@ def _load_city_config() -> Dict[str, dict]:
 CITY_CONFIG: Dict[str, dict] = _load_city_config()
 
 
+# IANA timezone of each city's Kalshi resolution station. Used to gate same-day
+# LOW markets in local time: the daily low prints near local dawn, so a fixed ET
+# cutoff wrongly blocked western cities before their low had even occurred.
+CITY_TIMEZONES: Dict[str, str] = {
+    "nyc": "America/New_York",
+    "boston": "America/New_York",
+    "philadelphia": "America/New_York",
+    "washington_dc": "America/New_York",
+    "miami": "America/New_York",
+    "atlanta": "America/New_York",
+    "chicago": "America/Chicago",
+    "minneapolis": "America/Chicago",
+    "dallas": "America/Chicago",
+    "austin": "America/Chicago",
+    "san_antonio": "America/Chicago",
+    "houston": "America/Chicago",
+    "new_orleans": "America/Chicago",
+    "oklahoma_city": "America/Chicago",
+    "denver": "America/Denver",
+    "phoenix": "America/Phoenix",        # no DST
+    "las_vegas": "America/Los_Angeles",
+    "los_angeles": "America/Los_Angeles",
+    "san_francisco": "America/Los_Angeles",
+    "seattle": "America/Los_Angeles",
+}
+
+
+def get_city_timezone(city_key: str) -> str:
+    """IANA timezone for a city's resolution station.
+
+    Falls back to a coarse longitude-based estimate, then America/New_York, so an
+    unmapped city never crashes the trading-hours gate (it just trades on an
+    approximate local clock until added to CITY_TIMEZONES).
+    """
+    tz = CITY_TIMEZONES.get(city_key)
+    if tz:
+        return tz
+    city = CITY_CONFIG.get(city_key)
+    if city and city.get("lon") is not None:
+        # ~15° of longitude per hour west of UTC.
+        offset = round(city["lon"] / 15.0)
+        approx = {
+            -5: "America/New_York", -6: "America/Chicago",
+            -7: "America/Denver",   -8: "America/Los_Angeles",
+        }
+        return approx.get(offset, "America/New_York")
+    return "America/New_York"
+
+
 # ── 30-year NOAA Climate Normals 1991-2020 (monthly high/low °F) ─────────────
 # Source: NOAA Climate Normals for each city's Kalshi resolution station.
 # Format: {city_key: [(high, low), ...]} indexed by month (0=Jan, 11=Dec).

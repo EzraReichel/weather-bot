@@ -122,6 +122,7 @@ def log_paper_trade(signal) -> Optional[Trade]:
             entry_price      = entry_price,
             forecast_mean    = signal.ensemble_mean,
             forecast_std     = signal.ensemble_std,
+            model_data_age_hours = getattr(signal, "model_data_age_hours", None),
             resolution_date  = market.target_date.isoformat(),
             resolved         = False,
         )
@@ -181,7 +182,9 @@ async def settle_paper_trades() -> List[Trade]:
         pending = db.query(Trade).filter(
             Trade.is_paper == True,
             Trade.resolved == False,
-            Trade.resolution_date <= today.isoformat(),
+            # Strictly before today (ET): a market resolving *today* doesn't
+            # settle until 11:59 PM ET, so it isn't eligible yet.
+            Trade.resolution_date < today.isoformat(),
         ).all()
 
         if not pending:
@@ -261,6 +264,9 @@ async def settle_paper_trades() -> List[Trade]:
     except Exception as e:
         logger.error(f"Paper trade settlement error: {e}", exc_info=True)
         db.rollback()
+        # The batch rolled back — nothing persisted, so surface nothing.
+        # Settling (and notifying) retries cleanly next cycle.
+        return []
     finally:
         db.close()
 

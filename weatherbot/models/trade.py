@@ -33,6 +33,15 @@ class Trade(TradeBase):
     kelly_size       = Column(Float)
     contracts        = Column(Integer)
     entry_price      = Column(Float)
+    # The Kelly target this position aimed to fill, in contracts. Fixed at the
+    # original entry (top-ups raise it to the high-water target). `contracts`
+    # ends up holding contracts actually FILLED after settlement, so
+    # filled / target_contracts = how much of Kelly filled by resolution.
+    target_contracts = Column(Integer, nullable=True)
+    # Hours since the latest model run when this trade was entered (staleness
+    # proxy). Lets the staleness gate be evaluated against realized P&L; null for
+    # rows created before this column existed.
+    model_data_age_hours = Column(Float, nullable=True)
 
     # Forecast details
     forecast_mean    = Column(Float)
@@ -57,6 +66,9 @@ class Trade(TradeBase):
     result           = Column(String, nullable=True)        # "win", "loss", or "push"
     pnl              = Column(Float, nullable=True)
     resolved_at      = Column(DateTime, nullable=True)
+    # Set once the settlement Discord alert has been sent. Decouples settling
+    # (persist `resolved`) from notifying so a rollback/restart can't re-alert.
+    notified_at      = Column(DateTime, nullable=True)
 
 
 class ModelCityAccuracy(TradeBase):
@@ -113,6 +125,9 @@ def _migrate():
             ("kalshi_order_id", "VARCHAR"),
             ("fill_price",      "FLOAT"),
             ("orders",          "TEXT"),
+            ("notified_at",     "TIMESTAMP"),
+            ("target_contracts", "INTEGER"),
+            ("model_data_age_hours", "FLOAT"),
         ]
         for col, typedef in new_cols:
             if col not in cols:
@@ -123,3 +138,15 @@ def _migrate():
                         ))
                     else:
                         conn.execute(text(f"ALTER TABLE trades ADD COLUMN {col} {typedef}"))
+                # Backfill: trades already resolved before this column existed
+                # have been notified historically — stamp them so the new
+                # notify pass doesn't blast alerts for the entire backlog.
+                if col == "notified_at":
+                    with conn.begin():
+                        conn.execute(text(
+                            "UPDATE trades SET notified_at = COALESCE(resolved_at, "
+                            + ("NOW()" if is_pg else "CURRENT_TIMESTAMP")
+                            + ") WHERE resolved = "
+                            + ("TRUE" if is_pg else "1")
+                            + " AND notified_at IS NULL"
+                        ))
