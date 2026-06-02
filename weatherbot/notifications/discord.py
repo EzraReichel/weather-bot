@@ -1,5 +1,6 @@
 """Discord webhook notifications for weather arb signals."""
 import logging
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -15,164 +16,181 @@ COLOR_YELLOW = 0xF39C12  # Low-confidence signal
 COLOR_BLUE = 0x3498DB    # Daily summary
 COLOR_RED = 0xE74C3C     # Error/alert
 
+# Discord hard limits — exceeding any of these makes the API reject the whole
+# webhook with a 400, so the notification silently never arrives. We clamp
+# everything defensively before sending.
+_FIELD_NAME_MAX  = 256
+_FIELD_VALUE_MAX = 1024
+_TITLE_MAX       = 256
+_DESC_MAX        = 4096
+_MAX_FIELDS      = 25
+_ZERO_WIDTH      = "​"   # Discord rejects empty field name/value strings
+
+
+def _truncate(text, limit: int) -> str:
+    """Clamp a string to `limit` chars, appending an ellipsis when cut."""
+    s = "" if text is None else str(text)
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)] + "…"
+
+
+def _sanitize_embed(embed: dict) -> dict:
+    """
+    Clamp every field of an embed to Discord's limits so a single oversized
+    value (e.g. a long resolved-trades list) can't cause the entire webhook to
+    be rejected with a 400. Mutates and returns a copy.
+    """
+    e = dict(embed)
+    if "title" in e:
+        e["title"] = _truncate(e["title"], _TITLE_MAX)
+    if "description" in e:
+        e["description"] = _truncate(e["description"], _DESC_MAX)
+
+    fields = e.get("fields")
+    if fields:
+        clamped = []
+        for f in fields[:_MAX_FIELDS]:
+            clamped.append({
+                **f,
+                "name":  _truncate(f.get("name", ""),  _FIELD_NAME_MAX)  or _ZERO_WIDTH,
+                "value": _truncate(f.get("value", ""), _FIELD_VALUE_MAX) or _ZERO_WIDTH,
+            })
+        e["fields"] = clamped
+    return e
+
 
 def _post_embed(embed: dict) -> bool:
-    """POST a single embed to Discord. Returns True on success."""
+    """
+    POST a single embed to Discord. Returns True on success.
+
+    Clamps the embed to Discord's size limits first, and retries on 429 rate
+    limits (honoring retry_after) so bursts of settlement alerts don't get
+    silently dropped.
+    """
     url = settings.DISCORD_WEBHOOK_URL
     if not url:
         return False
 
-    try:
-        resp = requests.post(
-            url,
-            json={"embeds": [embed]},
-            timeout=10,
-        )
-        if resp.status_code in (200, 204):
-            return True
-        logger.warning(f"Discord webhook returned {resp.status_code}: {resp.text[:200]}")
-        return False
-    except Exception as e:
-        logger.error(f"Discord webhook failed: {e}")
-        return False
+    payload = {"embeds": [_sanitize_embed(embed)]}
 
+    for attempt in range(3):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code in (200, 204):
+                return True
+            if resp.status_code == 429:
+                retry_after = 1.0
+                try:
+                    retry_after = float(resp.json().get("retry_after", 1.0))
+                except Exception:
+                    pass
+                retry_after = min(max(retry_after, 0.5), 5.0)
+                logger.warning(
+                    f"Discord rate limited (429); retrying in {retry_after:.1f}s "
+                    f"(attempt {attempt + 1}/3)"
+                )
+                time.sleep(retry_after)
+                continue
+            logger.warning(f"Discord webhook returned {resp.status_code}: {resp.text[:300]}")
+            return False
+        except Exception as e:
+            logger.error(f"Discord webhook failed: {e}")
+            return False
 
+    logger.warning("Discord webhook failed after retries (rate limited)")
+    return False
 
-def _build_filter_report_text(scan_report) -> str:
-    """Build a compact filter breakdown string from a ScanReport."""
-    if scan_report is None:
-        return "No scan data available."
-
-    fr = scan_report.fetch_report
-    lines = []
-
-    # Liquidity filtered
-    liq = [f for f in fr.filtered if f.reason in ("low_ask", "low_volume")] if fr else []
-    if liq:
-        liq_lines = []
-        for f in liq[:8]:   # cap at 8 to stay under Discord 1024-char limit
-            if f.reason == "low_ask":
-                liq_lines.append(f"`{f.ticker}` ask={f.ask_size:.0f}")
-            else:
-                liq_lines.append(f"`{f.ticker}` vol={f.volume_24h:.0f}")
-        if len(liq) > 8:
-            liq_lines.append(f"…+{len(liq)-8} more")
-        lines.append(f"**Liquidity ({len(liq)}):** " + "  ".join(liq_lines))
-    else:
-        lines.append("**Liquidity:** none filtered")
-
-    # Low agreement
-    la = scan_report.low_agreement_filtered or []
-    if la:
-        la_lines = []
-        for s in la[:6]:
-            sp = s.source_probs
-            parts = [f"{n.upper()}={sp[n]:.0%}" for n in ["gfs","ecmwf","gem","nws"] if n in sp]
-            la_lines.append(f"`{s.market.market_id}` edge={s.edge:+.0%} [{' '.join(parts)}]")
-        if len(la) > 6:
-            la_lines.append(f"…+{len(la)-6} more")
-        lines.append(f"**Low agreement ({len(la)}):**\n" + "\n".join(la_lines))
-    else:
-        lines.append("**Low agreement:** none")
-
-    # Below edge threshold
-    be = scan_report.below_edge or []
-    if be:
-        be_lines = [f"`{s.market.market_id}` {s.edge:+.1%}" for s in be[:8]]
-        if len(be) > 8:
-            be_lines.append(f"…+{len(be)-8} more")
-        lines.append(f"**Below edge ({len(be)}):** " + "  ".join(be_lines))
-    else:
-        lines.append("**Below edge:** none")
-
-    return "\n".join(lines)
 
 
 def send_daily_summary(
-    unique_signals: int,
-    actionable_signals: int,
-    paper_logged_today: list,
-    paper_resolved_today: list,
-    daily_paper_pnl: float,
-    paper_stats: dict,
-    scan_report=None,
+    logged_today: list,
+    resolved_today: list,
+    daily_pnl: float,
+    stats: dict,
     daily_brier: Optional[float] = None,
-    live_stats: Optional[dict] = None,
     bankroll: Optional[float] = None,
+    live_trading: bool = False,
 ) -> bool:
-    """Send combined end-of-day summary to Discord at 11 PM ET."""
+    """
+    Send combined end-of-day summary to Discord at 11 PM ET.
+
+    Reports on the *active* trading mode only (live when LIVE_TRADING is on,
+    otherwise paper) so P&L, counts, and bankroll stay internally consistent —
+    no mixing of historical paper P&L into a live running total.
+    """
     if not settings.DISCORD_WEBHOOK_URL:
         return False
 
-    pnl_sign = "+" if daily_paper_pnl >= 0 else ""
-    live_pnl = (live_stats or {}).get("total_pnl", 0.0)
-    running_pnl = paper_stats.get("total_pnl", 0.0) + live_pnl
+    mode_label = "Live" if live_trading else "Paper"
+
+    pnl_sign = "+" if daily_pnl >= 0 else ""
+    running_pnl = stats.get("total_pnl", 0.0)
     running_sign = "+" if running_pnl >= 0 else ""
     color = COLOR_GREEN if running_pnl >= 0 else COLOR_RED
     if bankroll is None:
         bankroll = settings.INITIAL_BANKROLL + running_pnl
 
-    wins = paper_stats.get("wins", 0)
-    losses = paper_stats.get("losses", 0)
-    brier = paper_stats.get("brier")
+    wins = stats.get("wins", 0)
+    losses = stats.get("losses", 0)
+
+    # All-time Brier computed generically from resolved trades so it works for
+    # both paper and live stats dicts (live stats carries no precomputed brier).
+    resolved_trades = stats.get("resolved_trades", []) or []
+    brier_scores = [
+        (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
+        for t in resolved_trades
+        if t.model_prob is not None
+    ]
+    brier = (sum(brier_scores) / len(brier_scores)) if brier_scores else None
     brier_str = f"{brier:.3f}" if brier is not None else "n/a"
     daily_brier_str = f"{daily_brier:.3f}" if daily_brier is not None else "n/a"
 
-    # Paper trades logged today — brief list
-    if paper_logged_today:
+    # Trades logged today — brief list (capped to stay under the 1024-char field limit)
+    if logged_today:
         logged_lines = [
             f"`{t.ticker}` — {t.side.upper()} edge={t.edge:+.1%} @ {t.entry_price:.2%}"
-            for t in paper_logged_today
+            for t in logged_today[:12]
         ]
+        if len(logged_today) > 12:
+            logged_lines.append(f"…+{len(logged_today) - 12} more")
         logged_text = "\n".join(logged_lines)
     else:
         logged_text = "None today"
 
-    # Paper trades resolved today
-    if paper_resolved_today:
+    # Trades resolved today (capped)
+    if resolved_today:
         resolved_lines = []
-        for t in paper_resolved_today:
-            icon = "✅" if t.result == "win" else "❌"
+        for t in resolved_today[:12]:
+            icon = "✅" if t.result == "win" else ("🚫" if t.result == "cancelled" else "❌")
             kalshi_result = "YES" if (t.actual_temp or 0) >= 1.0 else "NO"
+            pnl_val = t.pnl if t.pnl is not None else 0.0
             resolved_lines.append(
-                f"{icon} `{t.ticker}` Kalshi={kalshi_result}  side={t.side.upper()}  ${t.pnl:+.2f}"
+                f"{icon} `{t.ticker}` Kalshi={kalshi_result}  side={t.side.upper()}  ${pnl_val:+.2f}"
             )
+        if len(resolved_today) > 12:
+            resolved_lines.append(f"…+{len(resolved_today) - 12} more")
         resolved_text = "\n".join(resolved_lines)
     else:
         resolved_text = "None settled today"
 
-    # Filter report — markets scanned vs filtered
-    fr = scan_report.fetch_report if scan_report else None
-    total_raw      = fr.total_raw if fr else 0
-    series_scanned = fr.series_scanned if fr else 0
-    liq_filtered   = len([f for f in fr.filtered if f.reason in ("low_ask","low_volume")]) if fr else 0
-    brackets       = len([f for f in fr.filtered if f.reason == "bracket"]) if fr else 0
-    passed_liq     = len(fr.markets) if fr else 0
-    filter_detail  = _build_filter_report_text(scan_report)
-
     fields = [
-        {"name": "Series Scanned",       "value": str(series_scanned),         "inline": True},
-        {"name": "Raw Markets",          "value": str(total_raw),               "inline": True},
-        {"name": "Passed Liquidity",     "value": str(passed_liq),             "inline": True},
-        {"name": "Unique Signals",       "value": str(unique_signals),         "inline": True},
-        {"name": "Actionable",           "value": f"**{actionable_signals}**", "inline": True},
-        {"name": "Paper Trades Today",   "value": str(len(paper_logged_today)),"inline": True},
-        {"name": "Today's P&L",          "value": f"**{pnl_sign}${daily_paper_pnl:.2f}**", "inline": True},
-        {"name": "Running P&L",          "value": f"**{running_sign}${running_pnl:.2f}**", "inline": True},
+        {"name": f"{mode_label} Trades Today", "value": str(len(logged_today)), "inline": True},
+        {"name": "Today's P&L",          "value": f"**{pnl_sign}${daily_pnl:.2f}**", "inline": True},
+        {"name": f"{mode_label} P&L (all-time)", "value": f"**{running_sign}${running_pnl:.2f}**", "inline": True},
         {"name": "Bankroll",             "value": f"**${bankroll:,.2f}**",                 "inline": True},
         {"name": "All-time W/L",         "value": f"{wins}W / {losses}L",     "inline": True},
         {"name": "Brier (today)",        "value": daily_brier_str,             "inline": True},
         {"name": "Brier (all-time)",     "value": brier_str,                   "inline": True},
-        {"name": "Filter Breakdown",     "value": filter_detail,               "inline": False},
-        {"name": "New Paper Trades",     "value": logged_text,                 "inline": False},
+        {"name": f"New {mode_label} Trades", "value": logged_text,             "inline": False},
         {"name": "Resolved Today",       "value": resolved_text,               "inline": False},
     ]
 
     embed = {
-        "title": "📊 Daily Summary",
+        "title": f"📊 Daily Summary · {mode_label}",
         "color": color,
         "fields": fields,
-        "footer": {"text": "Kalshi Weather Arb Bot · 11 PM ET"},
+        "footer": {"text": f"Kalshi Weather Arb Bot · {mode_label} · 11 PM ET"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -545,9 +563,10 @@ def send_live_trade_alert(signal, trade) -> bool:
     side = signal.direction.upper()
     betting_no = signal.direction == "no"
     display_model  = (1.0 - signal.model_probability)  if betting_no else signal.model_probability
-    display_market = (1.0 - signal.market_probability) if betting_no else signal.market_probability
 
-    fill_str = f"{trade.fill_price:.2%}" if trade.fill_price else f"{trade.entry_price:.2%}"
+    entry_price = trade.entry_price
+    fill_value = trade.fill_price if trade.fill_price else trade.entry_price
+    fill_str = f"{fill_value * 100:.0f}¢"
     order_id_str = trade.kalshi_order_id or "unknown"
 
     embed = {
@@ -558,7 +577,7 @@ def send_live_trade_alert(signal, trade) -> bool:
             {"name": "Side",         "value": f"**{side}**",                       "inline": True},
             {"name": "Edge",         "value": f"**+{abs(signal.edge):.1%}**",      "inline": True},
             {"name": "Our Model",    "value": f"{display_model:.1%}",              "inline": True},
-            {"name": "Market Price", "value": f"{display_market:.1%}",             "inline": True},
+            {"name": "Entry Price",  "value": f"{entry_price * 100:.0f}¢",         "inline": True},
             {"name": "Fill Price",   "value": fill_str,                            "inline": True},
             {"name": "Contracts",    "value": str(trade.contracts),                "inline": True},
             {"name": "Size",         "value": f"${trade.kelly_size:.2f}",          "inline": True},

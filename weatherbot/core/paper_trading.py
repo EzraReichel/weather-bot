@@ -204,11 +204,12 @@ async def settle_paper_trades() -> List[Trade]:
             # We bet "yes" or "no" — did we win?
             we_win = yes_wins if pt.side == "yes" else not yes_wins
 
+            fee = settings.KALSHI_FEE_RATE * pt.contracts * pt.entry_price * (1.0 - pt.entry_price)
             if we_win:
-                pnl = (1.0 - pt.entry_price) * pt.contracts * (1.0 - settings.KALSHI_FEE_RATE)
+                pnl = (1.0 - pt.entry_price) * pt.contracts - fee
                 result = "win"
             else:
-                pnl = pt.entry_price * pt.contracts * -1.0
+                pnl = pt.entry_price * pt.contracts * -1.0 - fee
                 result = "loss"
 
             pt.resolved    = True

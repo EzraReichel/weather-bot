@@ -60,3 +60,8 @@ htmlcov/
 # Keys / credentials
 key.txt
 *.key
+
+# Backtest artifacts / local data
+cache/
+backtest_results/
+Screenshot *.png

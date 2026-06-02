@@ -6,6 +6,7 @@ per-source member arrays for the ensemble-of-ensembles probability model.
 """
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
@@ -154,30 +155,18 @@ async def _fetch_nws_point_forecast(
             return SourceForecast(source="nws", member_highs=[], member_lows=[],
                                   ok=False, error=f"no periods matched {target_str}")
 
-        # Fixed uncertainty: ±3°F next day, ±5°F 2+ days out
-        days_out = (target_date - date.today()).days
-        sigma = 3.0 if days_out <= 1 else 5.0
-
-        # Build synthetic 21-member pseudo-ensemble from the NWS point value
-        import numpy as np
-        rng = np.random.default_rng(seed=int(target_date.strftime("%Y%m%d")))
-
-        highs: List[float] = []
-        lows:  List[float] = []
-
-        if day_high is not None:
-            highs = [float(v) for v in rng.normal(day_high, sigma, 21)]
-        if day_low is not None:
-            lows  = [float(v) for v in rng.normal(day_low, sigma, 21)]
+        # Return the NWS point forecast as a single deterministic member.
+        # No synthetic spread — the probability engine uses the Gaussian CDF
+        # std floor (3°F for highs, 2°F for lows) to express inherent
+        # uncertainty around a single point value.
+        highs: List[float] = [day_high] if day_high is not None else []
+        lows:  List[float] = [day_low]  if day_low  is not None else []
 
         if not highs and not lows:
             return SourceForecast(source="nws", member_highs=[], member_lows=[],
                                   ok=False, error="no usable temp values")
 
-        logger.debug(
-            f"NWS {city_key} {target_date}: high={day_high} low={day_low} "
-            f"sigma={sigma}°F days_out={days_out}"
-        )
+        logger.debug(f"NWS {city_key} {target_date}: high={day_high} low={day_low} (deterministic)")
         return SourceForecast(source="nws", member_highs=highs, member_lows=lows)
 
     except Exception as e:
@@ -197,6 +186,14 @@ async def fetch_rain_probability(city_key: str, target_date: date) -> Optional[f
     city = CITY_CONFIG.get(city_key)
     if not city:
         return None
+
+    cache_key = f"{city_key}_{target_date.isoformat()}"
+    now = time.time()
+    if cache_key in _rain_cache:
+        cached_time, cached_val = _rain_cache[cache_key]
+        if now - cached_time < _SOURCES_CACHE_TTL:
+            logger.debug(f"fetch_rain_probability cache hit: {city_key} {target_date}")
+            return cached_val
 
     params = {
         "latitude":   city["lat"],
@@ -221,7 +218,9 @@ async def fetch_rain_probability(city_key: str, target_date: date) -> Optional[f
         if not values or values[0] is None:
             return None
 
-        return float(values[0]) / 100.0   # convert percent to 0-1
+        result = float(values[0]) / 100.0   # convert percent to 0-1
+        _rain_cache[cache_key] = (now, result)
+        return result
 
     except Exception as e:
         logger.warning(f"Rain probability fetch failed for {city_key}: {e}")
@@ -306,6 +305,14 @@ async def fetch_current_observation(city_key: str) -> Optional[dict]:
         return None
 
 
+# ── Caches: (city_key, date_str) -> (fetch_timestamp, result) ────────────────
+# NWP model runs update ~every 6h; 2h TTL ensures we get fresh data at each
+# model-run scan while cutting API calls ~100x on the 5-min interval scans.
+_sources_cache: Dict[str, tuple] = {}
+_rain_cache: Dict[str, tuple] = {}
+_SOURCES_CACHE_TTL = 7200  # 2 hours
+
+
 # ── Public API: fetch all sources in parallel ─────────────────────────────────
 
 async def fetch_all_sources(
@@ -316,7 +323,19 @@ async def fetch_all_sources(
     Fetch forecasts from all four sources in parallel.
     Returns dict keyed by source name. Missing/failed sources are included
     with ok=False so callers can log and skip gracefully.
+
+    Results are cached for _SOURCES_CACHE_TTL seconds. Multiple threshold
+    markets for the same city+date share the same weather data, so the first
+    call fetches and all subsequent calls within the TTL window are free.
     """
+    cache_key = f"{city_key}_{target_date.isoformat()}"
+    now = time.time()
+    if cache_key in _sources_cache:
+        cached_time, cached_sources = _sources_cache[cache_key]
+        if now - cached_time < _SOURCES_CACHE_TTL:
+            logger.debug(f"fetch_all_sources cache hit: {city_key} {target_date}")
+            return cached_sources
+
     gfs_task   = _fetch_open_meteo_ensemble(city_key, target_date, "gfs_seamless")
     ecmwf_task = _fetch_open_meteo_ensemble(city_key, target_date, "ecmwf_ifs025")
     gem_task   = _fetch_open_meteo_ensemble(city_key, target_date, "gem_global")
@@ -348,4 +367,5 @@ async def fetch_all_sources(
         f"{ok_count}/4 sources OK  "
         + "  ".join(f"{n}={'OK' if sources[n].ok else 'FAIL'}" for n in names)
     )
+    _sources_cache[cache_key] = (now, sources)
     return sources

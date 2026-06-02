@@ -13,9 +13,12 @@ Probability blending policy (Task 3 fix):
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, date
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 
 from scipy.stats import norm
+
+if TYPE_CHECKING:
+    from weatherbot.core.strategy import StrategyParams
 
 logger = logging.getLogger("weatherbot")
 
@@ -38,19 +41,30 @@ ENSEMBLE_FRACTION_WEIGHT = 0.70
 GAUSSIAN_CDF_WEIGHT      = 0.30
 
 
-def _lead_time_factor(target_date: date) -> float:
-    """Compute uncertainty inflation factor based on hours until market resolution."""
+def _lead_time_factor(
+    target_date: date,
+    as_of: Optional[datetime] = None,
+    factors: Optional[list] = None,
+) -> float:
+    """
+    Compute uncertainty inflation factor based on hours until market resolution.
+
+    ``as_of`` injects the decision-time clock (a tz-aware datetime). When None,
+    the live wall clock is used — preserving the original behavior. ``factors``
+    overrides the lead-time bands (defaults to the module ``LEAD_TIME_FACTORS``).
+    """
     from zoneinfo import ZoneInfo
     ET = ZoneInfo("America/New_York")
-    now = datetime.now(ET)
+    now = as_of.astimezone(ET) if as_of is not None else datetime.now(ET)
     # Kalshi temperature markets settle at end of day ET (11:59 PM ET).
     resolution_dt = datetime(target_date.year, target_date.month, target_date.day, 23, 59, 59, tzinfo=ET)
     hours_out = max(0.0, (resolution_dt - now).total_seconds() / 3600.0)
 
-    for lo, hi, factor in LEAD_TIME_FACTORS:
+    bands = factors if factors is not None else LEAD_TIME_FACTORS
+    for lo, hi, factor in bands:
         if lo <= hours_out < hi:
             return factor
-    return 1.8  # fallback for beyond 72h
+    return bands[-1][2]  # fallback for beyond the last band
 
 
 @dataclass
@@ -72,6 +86,8 @@ def compute_probability(
     direction: str,           # "above" or "below"
     target_date: date,
     metric: str = "high",     # "high" or "low" — used to pick the right std floor
+    params: Optional["StrategyParams"] = None,
+    as_of: Optional[datetime] = None,
 ) -> Optional[ProbabilityResult]:
     """
     Compute calibrated probability that temperature is above/below threshold.
@@ -94,6 +110,16 @@ def compute_probability(
     if not member_values or len(member_values) < 2:
         return None
 
+    # Resolve tunables from params, falling back to module constants when no
+    # StrategyParams is supplied (preserves the original call sites).
+    ef_weight   = params.ensemble_fraction_weight if params else ENSEMBLE_FRACTION_WEIGHT
+    cdf_weight  = params.gaussian_cdf_weight       if params else GAUSSIAN_CDF_WEIGHT
+    floor_high  = params.std_floor_high            if params else STD_FLOOR_HIGH
+    floor_low   = params.std_floor_low             if params else STD_FLOOR_LOW
+    lt_factors  = list(params.lead_time_factors)   if params else None
+    prob_lo     = params.prob_floor                if params else 0.05
+    prob_hi     = params.prob_ceiling              if params else 0.95
+
     import statistics
     mean = statistics.mean(member_values)
     std = statistics.stdev(member_values)
@@ -101,12 +127,12 @@ def compute_probability(
     if std <= 0:
         std = 0.1  # Avoid division by zero; degenerate case
 
-    factor = _lead_time_factor(target_date)
+    factor = _lead_time_factor(target_date, as_of=as_of, factors=lt_factors)
     adj_std = std * factor
 
     # Apply std floor BEFORE the CDF to prevent over-extrapolation.
     # The floor is NOT applied to the ensemble fraction (that stays raw).
-    std_floor = STD_FLOOR_HIGH if metric != "low" else STD_FLOOR_LOW
+    std_floor = floor_high if metric != "low" else floor_low
     cdf_std = max(adj_std, std_floor)
 
     # Raw ensemble fraction — PRIMARY signal
@@ -117,14 +143,11 @@ def compute_probability(
         ensemble_fraction = sum(1 for v in member_values if v < threshold_f) / len(member_values)
         gaussian_cdf = float(norm.cdf(threshold_f, loc=mean, scale=cdf_std))
 
-    # Blend: 70% ensemble fraction + 30% Gaussian CDF
-    model_prob = (
-        ENSEMBLE_FRACTION_WEIGHT * ensemble_fraction
-        + GAUSSIAN_CDF_WEIGHT * gaussian_cdf
-    )
+    # Blend: ensemble fraction + Gaussian CDF (default 70/30)
+    model_prob = ef_weight * ensemble_fraction + cdf_weight * gaussian_cdf
 
     # Clamp to avoid extreme values
-    model_prob = max(0.05, min(0.95, model_prob))
+    model_prob = max(prob_lo, min(prob_hi, model_prob))
 
     # Confidence: lower std = higher confidence
     confidence = 1.0 - (adj_std / 10.0)
@@ -278,16 +301,36 @@ def compute_multi_source_probability(
     target_date: date,
     metric: str = "high",     # "high" or "low" — selects std floor
     city_key: str = "",       # used for dynamic weight lookup (optional)
+    params: Optional["StrategyParams"] = None,
+    as_of: Optional[datetime] = None,
 ) -> Optional[MultiSourceResult]:
     """
     Compute ensemble-of-ensembles probability from multiple weather sources.
 
     Each source's member array is fed through the Gaussian CDF independently.
-    Results are combined with SOURCE_WEIGHTS (renormalised if sources are missing).
-    Cross-model agreement is assessed to set confidence tier.
+    Results are combined with the configured source weights (renormalised if
+    sources are missing). Cross-model agreement is assessed to set the
+    confidence tier.
+
+    ``params`` supplies all tunables (weights, std floors, agreement bands,
+    outlier dampening, blend weights, clamps); when None the module constants
+    are used. ``as_of`` injects the decision-time clock for lead-time inflation.
     """
+    # Resolve tunables (params override module constants).
+    ef_weight    = params.ensemble_fraction_weight if params else ENSEMBLE_FRACTION_WEIGHT
+    cdf_weight   = params.gaussian_cdf_weight       if params else GAUSSIAN_CDF_WEIGHT
+    floor_high   = params.std_floor_high            if params else STD_FLOOR_HIGH
+    floor_low    = params.std_floor_low             if params else STD_FLOOR_LOW
+    lt_factors   = list(params.lead_time_factors)   if params else None
+    prob_lo      = params.prob_floor                if params else 0.05
+    prob_hi      = params.prob_ceiling              if params else 0.95
+    agree_tight  = params.agreement_tight           if params else AGREEMENT_TIGHT
+    maj_band     = params.majority_band             if params else MAJORITY_BAND
+    outlier_thr  = params.outlier_threshold         if params else OUTLIER_THRESHOLD
+    outlier_damp = params.outlier_dampen            if params else OUTLIER_DAMPEN
+
     source_probs: Dict[str, SourceProbability] = {}
-    factor = _lead_time_factor(target_date)
+    factor = _lead_time_factor(target_date, as_of=as_of, factors=lt_factors)
 
     for name, src in sources.items():
         if not src.ok or not src.member_highs:
@@ -296,34 +339,39 @@ def compute_multi_source_probability(
         import statistics as _stats
         members = src.member_highs  # caller pre-loads the correct metric into member_highs — see weather_signals.py
 
-        if len(members) < 2:
+        if len(members) < 1:
             continue
 
         mean = _stats.mean(members)
-        std  = _stats.stdev(members)
-        if std <= 0:
-            std = 0.1
+        std  = _stats.stdev(members) if len(members) > 1 else 0.0
+        if std < 0:
+            std = 0.0
         adj_std = std * factor
 
         # Apply std floor before CDF (same policy as single-source compute_probability)
-        std_floor = STD_FLOOR_HIGH if metric != "low" else STD_FLOOR_LOW
+        std_floor = floor_high if metric != "low" else floor_low
         cdf_std = max(adj_std, std_floor)
 
-        # Raw ensemble fraction — PRIMARY signal
         if direction == "above":
-            ensemble_frac = sum(1 for v in members if v > threshold_f) / len(members)
             gaussian_cdf = float(1.0 - norm.cdf(threshold_f, loc=mean, scale=cdf_std))
         else:
-            ensemble_frac = sum(1 for v in members if v < threshold_f) / len(members)
             gaussian_cdf = float(norm.cdf(threshold_f, loc=mean, scale=cdf_std))
 
-        # Blend: 70% ensemble fraction + 30% Gaussian CDF
-        prob = (
-            ENSEMBLE_FRACTION_WEIGHT * ensemble_frac
-            + GAUSSIAN_CDF_WEIGHT * gaussian_cdf
-        )
+        if len(members) == 1:
+            # Single deterministic value (e.g. NWS point forecast) — use pure CDF.
+            # Ensemble fraction is meaningless (0 or 1) with one member.
+            prob = gaussian_cdf
+        else:
+            # Raw ensemble fraction — PRIMARY signal
+            if direction == "above":
+                ensemble_frac = sum(1 for v in members if v > threshold_f) / len(members)
+            else:
+                ensemble_frac = sum(1 for v in members if v < threshold_f) / len(members)
 
-        prob = max(0.05, min(0.95, prob))
+            # Blend: ensemble fraction + Gaussian CDF (default 70/30)
+            prob = ef_weight * ensemble_frac + cdf_weight * gaussian_cdf
+
+        prob = max(prob_lo, min(prob_hi, prob))
 
         source_probs[name] = SourceProbability(
             source=name, prob=prob, members=len(members),
@@ -341,9 +389,15 @@ def compute_multi_source_probability(
     # If one source is >OUTLIER_THRESHOLD away from the median of the other 3,
     # cut its weight by OUTLIER_DAMPEN and redistribute to the agreeing models.
     outlier_dampened: Optional[str] = None
-    # Use dynamic per-city Brier weights when sufficient data exists,
-    # otherwise fall back to the static SOURCE_WEIGHTS.
-    _base_weights = get_dynamic_source_weights(city_key, metric) if city_key else SOURCE_WEIGHTS
+    # Static base weights: params.source_weights when supplied, else module default.
+    _static_weights = params.source_weights if params else SOURCE_WEIGHTS
+    # Use dynamic per-city Brier weights when enabled and a city is given,
+    # otherwise fall back to the static weights.
+    _use_dynamic = params.use_dynamic_brier_weights if params else True
+    if city_key and _use_dynamic:
+        _base_weights = get_dynamic_source_weights(city_key, metric)
+    else:
+        _base_weights = _static_weights
     raw_weights = {k: _base_weights.get(k, 1.0 / len(names)) for k in names}
 
     if len(names) >= 3:
@@ -351,9 +405,9 @@ def compute_multi_source_probability(
         for name in names:
             others = [source_probs[k].prob for k in names if k != name]
             others_median = _stat.median(others)
-            if abs(source_probs[name].prob - others_median) >= OUTLIER_THRESHOLD:
+            if abs(source_probs[name].prob - others_median) >= outlier_thr:
                 # This source is a clear outlier — dampen its weight
-                saved = raw_weights[name] * OUTLIER_DAMPEN
+                saved = raw_weights[name] * outlier_damp
                 raw_weights[name] -= saved
                 # Redistribute evenly to the other (agreeing) sources
                 per_other = saved / len(others)
@@ -372,24 +426,24 @@ def compute_multi_source_probability(
     norm_weights = {k: v / total_w for k, v in raw_weights.items()}
 
     combined = sum(source_probs[k].prob * norm_weights[k] for k in names)
-    combined = max(0.05, min(0.95, combined))
+    combined = max(prob_lo, min(prob_hi, combined))
 
     # ── Agreement assessment (majority-rules) ─────────────────────────────────
     # HIGH:   all sources within AGREEMENT_TIGHT (10%)
     # MEDIUM: 3 of 4 within MAJORITY_BAND (15%) of each other
     # LOW:    genuine 2v2 split — no 3-source cluster within MAJORITY_BAND
 
-    if max_spread <= AGREEMENT_TIGHT:
+    if max_spread <= agree_tight:
         agreement = "HIGH"
     elif len(names) < 3:
         agreement = "MEDIUM"
     else:
-        # Check for 3-source majority cluster within MAJORITY_BAND
+        # Check for 3-source majority cluster within the majority band
         sorted_probs = sorted(probs)
         majority_found = False
         if len(sorted_probs) >= 3:
             for i in range(len(sorted_probs) - 2):
-                if sorted_probs[i + 2] - sorted_probs[i] <= MAJORITY_BAND:
+                if sorted_probs[i + 2] - sorted_probs[i] <= maj_band:
                     majority_found = True
                     break
         agreement = "MEDIUM" if majority_found else "LOW"
@@ -421,13 +475,26 @@ def compute_multi_source_probability(
     )
 
 
-def min_profitable_edge(fee_rate: float) -> float:
+def kalshi_trade_fee(entry_price: float, n_contracts: int = 1, fee_coef: float = 0.07) -> float:
     """
-    Minimum edge needed to profit after Kalshi fees.
-    fee_rate = fraction of profit taken as fee (e.g. 0.07 = 7%)
-    min_edge = fee_rate / (1 - fee_rate)
+    Kalshi trading fee: C × n × P × (1 − P).
+    Charged at execution on both sides, win or lose.
+    Verify the current coefficient against Kalshi's fee schedule before deploying.
     """
-    return fee_rate / (1.0 - fee_rate)
+    return fee_coef * n_contracts * entry_price * (1.0 - entry_price)
+
+
+def min_profitable_edge(entry_price: float, fee_coef: float = 0.07) -> float:
+    """
+    Minimum model edge to break even after Kalshi fees.
+
+    Breakeven: model_prob = entry_price + fee_per_contract
+             = entry_price + C × entry_price × (1 − entry_price)
+    Min edge  = C × P × (1 − P)
+
+    This is price-dependent — cheapest near the extremes, highest at 50¢.
+    """
+    return fee_coef * entry_price * (1.0 - entry_price)
 
 
 def kelly_size(
@@ -439,32 +506,28 @@ def kelly_size(
     fee_rate: float,
 ) -> float:
     """
-    Kelly-sized position amount, net of Kalshi fees.
+    Kelly-sized position amount using the real Kalshi fee structure.
 
-    Kelly fraction: f = (b*p - q) / b
-    where b = (1 - entry_price) / entry_price (net odds)
-          p = model_prob of winning
-          q = 1 - p
-    Then subtract fee from expected value before sizing.
+    Fee C×P×(1−P) is charged at execution on both winners and losers.
+    Per contract:
+      net win  = (1 − P) − fee
+      net loss = P + fee
+    Kelly f* = (p_win × b − (1 − p_win)) / b  where b = net_win / net_loss
     """
-    if direction == "yes":
-        entry = entry_price
-        p_win = model_prob
-    else:
-        entry = entry_price
-        p_win = 1.0 - model_prob
+    p_win = model_prob if direction == "yes" else 1.0 - model_prob
 
-    if entry <= 0 or entry >= 1:
+    if entry_price <= 0 or entry_price >= 1:
         return 0.0
 
-    # Net odds per dollar risked
-    b = (1.0 - entry) / entry
+    fee = kalshi_trade_fee(entry_price, n_contracts=1, fee_coef=fee_rate)
+    net_win  = (1.0 - entry_price) - fee
+    net_loss = entry_price + fee
 
-    # Fee-adjusted net odds: win pays b * (1 - fee_rate)
-    b_net = b * (1.0 - fee_rate)
+    if net_win <= 0 or net_loss <= 0:
+        return 0.0
 
-    q_win = 1.0 - p_win
-    kelly_f = (b_net * p_win - q_win) / b_net if b_net > 0 else 0.0
+    b = net_win / net_loss
+    kelly_f = (p_win * b - (1.0 - p_win)) / b
     kelly_f = max(0.0, kelly_f)
 
     return kelly_f * kelly_fraction * bankroll

@@ -189,14 +189,23 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
                         filter_reason="model_divergence",
                     )
 
-        # Re-map member list to correct metric (highs vs lows)
+        # Re-map member list to correct metric (highs vs lows) and apply
+        # per-city grid bias. Open-Meteo returns grid-cell values that can
+        # differ systematically from the station thermometer Kalshi resolves on.
+        # Bias is additive (positive = grid runs cold relative to station).
+        # Set in cities.json grid_bias.{high|low}; defaults to 0.0.
         from weatherbot.data.multi_source_weather import SourceForecast
+        city_cfg = CITY_CONFIG.get(market.city_key, {})
+        grid_bias: float = city_cfg.get("grid_bias", {}).get(market.metric, 0.0)
+
         metric_sources: Dict[str, SourceForecast] = {}
         for name, src in raw_sources.items():
             if not src.ok:
                 metric_sources[name] = src
                 continue
             members = src.member_highs if market.metric == "high" else src.member_lows
+            if grid_bias != 0.0:
+                members = [m + grid_bias for m in members]
             metric_sources[name] = SourceForecast(
                 source=name,
                 member_highs=members,
@@ -524,7 +533,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
         edge = 0.0
 
     # Reasoning string
-    min_edge = min_profitable_edge(settings.KALSHI_FEE_RATE)
+    min_edge = min_profitable_edge(entry_price, fee_coef=settings.KALSHI_FEE_RATE)
     req_edge = LOW_CONFIDENCE_EDGE_OVERRIDE if (low_conf or agreement == "LOW") else settings.MIN_EDGE_THRESHOLD
     status = "ACTIONABLE" if abs(edge) >= req_edge else "FILTERED"
 

@@ -8,6 +8,10 @@
     "nws_office": "OKX",
     "nws_gridpoint": "OKX/33,37",
     "enabled": true,
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
+    },
     "normals": [
       [
         39,
@@ -144,6 +148,10 @@
       "rain": [
         "KXRAINCHIM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "miami": {
@@ -217,6 +225,10 @@
         "KXRAINMIA",
         "KXRAINMIAM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "los_angeles": {
@@ -289,6 +301,10 @@
       "rain": [
         "KXRAINLAXM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "denver": {
@@ -362,6 +378,10 @@
       "rain": [
         "KXRAINDENM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "austin": {
@@ -433,6 +453,10 @@
       "rain": [
         "KXRAINAUSM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "houston": {
@@ -506,6 +530,10 @@
         "KXRAINHOUM",
         "KXRAINHOU"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "boston": {
@@ -573,6 +601,10 @@
       "low": [
         "KXLOWTBOS"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "washington_dc": {
@@ -640,6 +672,10 @@
       "low": [
         "KXLOWTDC"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "phoenix": {
@@ -707,6 +743,10 @@
       "low": [
         "KXLOWTPHX"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "seattle": {
@@ -778,6 +818,10 @@
         "KXRAINSEAM",
         "KXRAINSEA"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "san_francisco": {
@@ -848,6 +892,10 @@
       "rain": [
         "KXRAINSFOM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "atlanta": {
@@ -915,6 +963,10 @@
       "low": [
         "KXLOWTATL"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "dallas": {
@@ -985,6 +1037,10 @@
       "rain": [
         "KXRAINDALM"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "las_vegas": {
@@ -1052,6 +1108,10 @@
       "low": [
         "KXLOWTLV"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "minneapolis": {
@@ -1119,6 +1179,10 @@
       "low": [
         "KXLOWTMIN"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "new_orleans": {
@@ -1189,6 +1253,10 @@
       "rain": [
         "KXRAINNO"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "oklahoma_city": {
@@ -1256,6 +1324,10 @@
       "low": [
         "KXLOWTOKC"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "san_antonio": {
@@ -1323,6 +1395,10 @@
       "low": [
         "KXLOWTSATX"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   },
   "philadelphia": {
@@ -1391,6 +1467,10 @@
         "KXLOWPHIL",
         "KXLOWTPHIL"
       ]
+    },
+    "grid_bias": {
+      "high": 0.0,
+      "low": 0.0
     }
   }
 }

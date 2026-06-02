@@ -1,7 +1,7 @@
 """Live trading — order placement, settlement, and stats."""
 import json
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from weatherbot.config import settings
@@ -83,93 +83,18 @@ async def log_live_trade(signal) -> Optional[Trade]:
         from weatherbot.notifications.discord import send_live_order_failed_alert
         client = KalshiClient()
 
-        # ── Reconcile against existing orders (top-up logic) ──────────────────
-        # Instead of skipping when a pending trade exists, count how many
-        # contracts are already working for this market (filled + still resting
-        # on the same side) and only order the remaining gap to the Kelly
-        # target.  A partial fill on an earlier scan thus gets topped up here
-        # rather than left stuck below target until settlement.
+        # Dedup: one order per market at a time.
+        # Top-up logic is disabled; it is being rebuilt against a backtest DB.
         existing = db.query(Trade).filter(
             Trade.ticker == market.market_id,
             Trade.is_paper == False,
             Trade.resolved == False,
-            Trade.side == signal.direction,
-        ).all()
-
-        # Cap on CUMULATIVE contracts ORDERED for this position — read from the
-        # DB, NOT from live fill status. This is critical: a cancelled or
-        # unfilled order must never free up budget to re-buy. If we measured
-        # "currently filled + resting" instead, then every time Kalshi cancels a
-        # resting order the count collapses toward zero, the position looks
-        # "under goal" again, and the bot re-orders the full target on the next
-        # scan — an unbounded re-buy loop (this is exactly what blew a position
-        # up to 395 contracts / $209 across 13 orders).
-        #
-        # We do NOT retry/replace cancelled or partially-unfilled orders by
-        # design: order up to the target once, cumulatively, and never exceed it.
-        already_ordered = sum(ex.contracts or 0 for ex in existing)
-
-        contracts = target_contracts - already_ordered
-        if contracts <= 0:
-            logger.debug(
-                f"Live top-up skipped: {market.market_id} — "
-                f"{already_ordered} contracts already ordered ≥ target {target_contracts}"
-            )
+        ).first()
+        if existing:
+            logger.debug(f"Live dedup skipped: {market.market_id} (open position exists)")
             return None
 
-        # The position row top-ups fold into — the earliest existing order.
-        anchor = min(existing, key=lambda ex: ex.created_at or datetime.max) if existing else None
-
-        if existing:
-            # ── Top-up guards ─────────────────────────────────────────────────
-            # The edge is already re-checked upstream each scan (the signal only
-            # reaches here if it still clears MIN_EDGE_THRESHOLD at the current
-            # price), so every add is +EV at the moment. That handles the
-            # "chasing up" case — when the ask rises toward our view, edge shrinks
-            # and the gate eventually blocks it. The dangerous direction is the
-            # opposite: when our side's ask FALLS, the market is disagreeing with
-            # us harder and Kelly wants to add MORE. Averaging down like that is
-            # only safe if our (possibly stale) model still backs the position.
-            first_fill = anchor.fill_price or anchor.entry_price
-
-            def _our_conviction(p_yes: float) -> float:
-                # Confidence in the side we're actually holding (0..1).
-                return p_yes if signal.direction == "yes" else 1.0 - p_yes
-
-            entry_conviction   = _our_conviction(anchor.model_prob or 0.0)
-            current_conviction = _our_conviction(signal.model_probability)
-
-            # Guard A — model must still corroborate the position. If our own
-            # conviction has weakened since entry, don't add even if a stale edge
-            # still clears threshold.
-            if current_conviction < entry_conviction:
-                logger.info(
-                    f"LIVE TOP-UP SKIPPED — model weakened: {market.market_id} "
-                    f"{signal.direction.upper()} conviction "
-                    f"{current_conviction:.0%} < entry {entry_conviction:.0%}"
-                )
-                return None
-
-            # Guard B — averaging down. If our ask has fallen more than
-            # TOPUP_MAX_ADVERSE_DROP below the original fill, the market has moved
-            # against us; only pile in further if the model has actively
-            # STRENGTHENED (strictly above entry), not merely held.
-            adverse_drop = first_fill - entry_price
-            if adverse_drop > settings.TOPUP_MAX_ADVERSE_DROP and current_conviction <= entry_conviction:
-                logger.info(
-                    f"LIVE TOP-UP SKIPPED — averaging down without conviction: "
-                    f"{market.market_id} {signal.direction.upper()} ask "
-                    f"{entry_price:.2%} is {adverse_drop:.2%} below first fill "
-                    f"{first_fill:.2%}; conviction {current_conviction:.0%} "
-                    f"not above entry {entry_conviction:.0%}"
-                )
-                return None
-
-            logger.info(
-                f"LIVE TOP-UP: {market.market_id} {signal.direction.upper()} — "
-                f"{already_ordered} already ordered, target {target_contracts}, "
-                f"ordering {contracts} more"
-            )
+        contracts = target_contracts
 
         # ── Balance preflight ─────────────────────────────────────────────
         # Guard 1: local — if capped_size can't cover even 1 contract, skip.
@@ -239,35 +164,6 @@ async def log_live_trade(signal) -> Optional[Trade]:
         fill_price = (fill_price_raw / 100.0) if fill_price_raw else entry_price
 
         new_order = {"id": order_id, "price": fill_price, "n": contracts}
-
-        if anchor is not None:
-            # ── Top-up: fold into the existing position row ───────────────────
-            # Blend cost basis by total cost / total contracts. This is exact for
-            # P&L (basis * count reproduces total cost); settlement later
-            # recomputes the basis from each order's ACTUAL fills.
-            prior_cost  = (anchor.contracts or 0) * (anchor.entry_price or 0.0)
-            add_cost    = contracts * fill_price
-            new_total   = (anchor.contracts or 0) + contracts
-
-            anchor.contracts   = new_total
-            anchor.entry_price = round((prior_cost + add_cost) / new_total, 4) if new_total else fill_price
-            anchor.fill_price  = anchor.entry_price
-            anchor.kelly_size  = round((anchor.kelly_size or 0.0) + order_cost, 2)
-            anchor.orders      = json.dumps(_position_orders(anchor) + [new_order])
-            # Refresh signal snapshot to the latest scan that justified the add.
-            anchor.model_prob    = signal.model_probability
-            anchor.market_price  = signal.market_probability
-            anchor.edge          = signal.edge
-            db.commit()
-            db.refresh(anchor)
-
-            anchor.topup_added = contracts   # transient hint for the alert layer
-            logger.info(
-                f"💸 LIVE TOP-UP logged: {market.market_id}  {signal.direction.upper()}  "
-                f"+{contracts} → {new_total} contracts  "
-                f"blended @ {anchor.entry_price:.2%}  order_id={order_id}"
-            )
-            return anchor
 
         trade = Trade(
             is_paper         = False,
@@ -349,17 +245,49 @@ async def settle_live_trades() -> List[Trade]:
         from weatherbot.data.kalshi_client import KalshiClient
         client = KalshiClient()
 
+        # Hours after resolution_date before we force-expire resting orders.
+        # Kalshi cancels all resting orders at market close, but the API may
+        # lag. After this window we treat resting as expired to prevent a trade
+        # from blocking settlement indefinitely.
+        RESTING_EXPIRY_HOURS = 6
+
         for trade in pending:
             # ── Step 1: tally ACTUAL fills across every order in the position ──
             total_filled, total_resting, undetermined, per_order = \
                 await _position_fill_status(client, trade)
 
             if total_resting > 0:
-                # Some contracts still working — don't settle until they resolve.
-                logger.info(
-                    f"Skipping {trade.ticker} — {total_resting} contract(s) still resting"
-                )
-                continue
+                # Check if the resolution date is far enough past that the
+                # resting order must have expired (Kalshi clears the book at
+                # market close). If so, treat resting as 0 and settle on fills.
+                try:
+                    res_date = date.fromisoformat(trade.resolution_date)
+                    from zoneinfo import ZoneInfo
+                    et = ZoneInfo("America/New_York")
+                    # Markets resolve at end of ET calendar day (11:59 PM ET)
+                    resolution_et = datetime(
+                        res_date.year, res_date.month, res_date.day,
+                        23, 59, 0, tzinfo=et,
+                    )
+                    hours_past = (
+                        datetime.now(timezone.utc) - resolution_et.astimezone(timezone.utc)
+                    ).total_seconds() / 3600.0
+                    if hours_past < RESTING_EXPIRY_HOURS:
+                        logger.info(
+                            f"Skipping {trade.ticker} — {total_resting} contract(s) still "
+                            f"resting, {hours_past:.1f}h past resolution (expiry threshold "
+                            f"{RESTING_EXPIRY_HOURS}h)"
+                        )
+                        continue
+                    logger.warning(
+                        f"{trade.ticker}: {total_resting} resting contract(s) after "
+                        f"{hours_past:.1f}h — treating as expired, settling on "
+                        f"{total_filled} confirmed fill(s)"
+                    )
+                    # Fall through: settle on total_filled only (resting ignored)
+                except Exception as _e:
+                    logger.warning(f"Resting expiry check failed for {trade.ticker}: {_e}")
+                    continue
 
             if total_filled == 0 and undetermined == 0:
                 # Every order cancelled/expired with zero fills — no P&L
@@ -384,12 +312,27 @@ async def settle_live_trades() -> List[Trade]:
             cost   = sum(o["filled"] * o["price"] for o in per_order)
             filled_count = sum(o["filled"] for o in per_order)
 
+            if filled_count == 0 and undetermined > 0:
+                # We have undetermined orders and zero confirmed fills.
+                # Booking P&L on unverifiable fills risks a phantom loss.
+                # Skip and retry next settlement cycle.
+                logger.warning(
+                    f"Skipping {trade.ticker}: {undetermined} undetermined contract(s) "
+                    f"with 0 confirmed fills — deferring to next cycle"
+                )
+                continue
+
             if filled_count == 0:
                 logger.warning(
                     f"{trade.ticker}: no resolvable fills but status not all-cancelled "
-                    f"— settling with recorded contract count {trade.contracts}"
+                    f"— settling cancelled with zero P&L"
                 )
-                filled_count = trade.contracts or 0
+                trade.resolved    = True
+                trade.result      = "cancelled"
+                trade.pnl         = 0.0
+                trade.resolved_at = datetime.utcnow()
+                settled.append(trade)
+                continue
             else:
                 basis = cost / filled_count
                 if filled_count != trade.contracts:
@@ -404,11 +347,12 @@ async def settle_live_trades() -> List[Trade]:
             yes_wins = (kalshi_result == "yes")
             we_win = yes_wins if trade.side == "yes" else not yes_wins
 
+            fee = settings.KALSHI_FEE_RATE * filled_count * trade.entry_price * (1.0 - trade.entry_price)
             if we_win:
-                pnl = (1.0 - trade.entry_price) * filled_count * (1.0 - settings.KALSHI_FEE_RATE)
+                pnl = (1.0 - trade.entry_price) * filled_count - fee
                 result = "win"
             else:
-                pnl = trade.entry_price * filled_count * -1.0
+                pnl = trade.entry_price * filled_count * -1.0 - fee
                 result = "loss"
 
             trade.resolved    = True
