@@ -24,12 +24,16 @@ from weatherbot.config import settings
 
 # Lead-time uncertainty inflation: (lo_hours, hi_hours, factor). Mirrors
 # probability.LEAD_TIME_FACTORS. Multiplied into the ensemble std before the CDF.
+# The final band's upper bound is a large finite number rather than float('inf')
+# so StrategyParams serializes to JSON (Postgres rejects Infinity); hours-to-
+# resolution never approaches it, so behavior is identical.
+LEAD_TIME_UPPER = 1_000_000.0
 DEFAULT_LEAD_TIME_FACTORS: Tuple[Tuple[float, float, float], ...] = (
     (0, 12, 1.0),
     (12, 24, 1.1),
     (24, 48, 1.3),
     (48, 72, 1.5),
-    (72, float("inf"), 1.8),
+    (72, LEAD_TIME_UPPER, 1.8),
 )
 
 # Static per-source blend weights (mirrors probability.SOURCE_WEIGHTS).
@@ -138,3 +142,34 @@ class StrategyParams:
     def with_(self, **overrides) -> "StrategyParams":
         """Return a copy with the given fields replaced (convenience over replace())."""
         return replace(self, **overrides)
+
+    def to_dict(self) -> dict:
+        """JSON-safe dict (tuples become lists, non-finite floats clamped). Round-trips via from_dict."""
+        import math
+        from dataclasses import asdict
+
+        def _clean(v):
+            if isinstance(v, float) and not math.isfinite(v):
+                return LEAD_TIME_UPPER if v > 0 else -LEAD_TIME_UPPER
+            if isinstance(v, dict):
+                return {k: _clean(x) for k, x in v.items()}
+            if isinstance(v, (list, tuple)):
+                return [_clean(x) for x in v]
+            return v
+
+        return _clean(asdict(self))
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "StrategyParams":
+        """
+        Build from a (possibly partial) dict — unknown keys ignored, missing keys
+        take defaults. Coerces the nested lead_time/model_run sequences back to
+        the tuple-of-tuples shape the engine expects.
+        """
+        valid = {f.name for f in __import__("dataclasses").fields(cls)}
+        clean = {k: v for k, v in (d or {}).items() if k in valid}
+        if "lead_time_factors" in clean and clean["lead_time_factors"] is not None:
+            clean["lead_time_factors"] = tuple(tuple(x) for x in clean["lead_time_factors"])
+        if "model_run_hours_et" in clean and clean["model_run_hours_et"] is not None:
+            clean["model_run_hours_et"] = tuple(tuple(x) for x in clean["model_run_hours_et"])
+        return cls(**clean)

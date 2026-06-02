@@ -195,6 +195,72 @@ class BtSettlement(BacktestBase):
     filled_at        = Column(DateTime, default=datetime.utcnow)
 
 
+class BtRun(BacktestBase):
+    """
+    One backtest run — a strategy replayed over a date range. Holds the inputs
+    (strategy name + full StrategyParams) and the headline outputs (metrics +
+    equity curve) so the Lab UI can list and revisit runs. Per-trade detail
+    lives in bt_run_trades. These tables never touch the live `trades` table.
+    """
+    __tablename__ = "bt_runs"
+
+    id            = Column(Integer, primary_key=True)
+    run_id        = Column(String, unique=True, index=True)   # uuid hex
+    created_at    = Column(DateTime, default=datetime.utcnow, index=True)
+
+    name          = Column(String, nullable=True)             # user label
+    strategy      = Column(String, default="default")         # registered strategy name
+    params        = Column(JSON)                              # full StrategyParams dict
+
+    start_date    = Column(String, index=True)                # YYYY-MM-DD (sim window)
+    end_date      = Column(String, index=True)
+    cities        = Column(JSON, nullable=True)               # [] = all captured cities
+
+    status        = Column(String, default="queued")          # queued|running|done|error
+    error         = Column(String, nullable=True)
+
+    # Outputs (populated on completion)
+    metrics       = Column(JSON, nullable=True)               # summary stat dict
+    equity_curve  = Column(JSON, nullable=True)               # [{t, bankroll, ...}]
+    n_trades      = Column(Integer, default=0)
+    initial_bankroll = Column(Float, nullable=True)
+    final_bankroll   = Column(Float, nullable=True)
+    total_pnl        = Column(Float, nullable=True)
+
+
+class BtRunTrade(BacktestBase):
+    """One simulated trade inside a backtest run (the run's ledger)."""
+    __tablename__ = "bt_run_trades"
+
+    id            = Column(Integer, primary_key=True)
+    run_id        = Column(String, index=True)
+
+    ticker        = Column(String, index=True)
+    city_key      = Column(String, index=True)
+    metric        = Column(String)
+    direction     = Column(String)        # market direction: above|below
+    threshold_f   = Column(Float)
+    target_date   = Column(String, index=True)
+
+    as_of         = Column(DateTime, nullable=True)   # decision time (sim clock)
+    bet_side      = Column(String)        # yes|no
+    model_prob    = Column(Float)
+    market_prob   = Column(Float)
+    edge          = Column(Float)
+    agreement     = Column(String, nullable=True)
+
+    fill_mode     = Column(String, default="taker")   # taker|maker
+    filled        = Column(Boolean, default=True)
+    entry_price   = Column(Float)         # actual fill price on bet_side
+    contracts     = Column(Integer, default=0)
+    size          = Column(Float, default=0.0)        # cost committed
+
+    resolved      = Column(Boolean, default=False)
+    result        = Column(String, nullable=True)     # win|loss|unsettled
+    settlement    = Column(String, nullable=True)     # yes|no (ground truth)
+    pnl           = Column(Float, nullable=True)
+
+
 def init_backtest_db():
     """Create the bt_* tables if they don't exist (idempotent)."""
     BacktestBase.metadata.create_all(bind=engine)

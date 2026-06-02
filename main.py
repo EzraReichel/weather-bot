@@ -29,7 +29,7 @@ logger = logging.getLogger("weatherbot")
 # ── Imports ──────────────────────────────────────────────────────────────────
 import json
 
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
@@ -75,6 +75,18 @@ async def serve_jsx():
 @app.get("/", include_in_schema=False)
 async def serve_ui():
     return FileResponse(FRONTEND_DIR / "index.html", headers=_NO_CACHE)
+
+
+@app.get("/backtest.jsx")
+async def serve_backtest_jsx():
+    """Serve the Backtest Lab JSX with the right MIME for Babel standalone."""
+    return FileResponse(FRONTEND_DIR / "backtest.jsx", media_type="application/javascript", headers=_NO_CACHE)
+
+
+@app.get("/backtest", include_in_schema=False)
+async def serve_backtest_ui():
+    """Standalone Backtest Lab page (kept separate from the main dashboard)."""
+    return FileResponse(FRONTEND_DIR / "backtest.html", headers=_NO_CACHE)
 
 
 CITIES_JSON = Path(__file__).parent / "weatherbot" / "cities.json"
@@ -348,6 +360,138 @@ async def api_git_commits():
         return {"commits": commits}
     except Exception as e:
         return {"commits": [], "error": str(e)}
+
+
+# ── Backtest Lab API ──────────────────────────────────────────────────────────
+# All read the bt_* archive / result tables; runs never touch the live trade
+# tables. The engine package (weatherbot.backtest) is imported lazily here so the
+# live worker's import graph stays clean.
+
+@app.get("/api/backtest/strategies")
+async def api_bt_strategies():
+    from weatherbot.backtest.registry import list_strategies
+    return {"strategies": list_strategies()}
+
+
+@app.get("/api/backtest/params/defaults")
+async def api_bt_param_defaults():
+    """Seed the param editor with the strategy that reproduces live behavior."""
+    from weatherbot.core.strategy import StrategyParams
+    return {"params": StrategyParams.live_default().to_dict()}
+
+
+@app.get("/api/backtest/runs")
+async def api_bt_runs(limit: int = 50):
+    from weatherbot.models.weather_db import SessionLocal
+    from weatherbot.models.backtest_db import BtRun, init_backtest_db
+    init_backtest_db()
+    db = SessionLocal()
+    try:
+        rows = db.query(BtRun).order_by(BtRun.created_at.desc()).limit(limit).all()
+        return {"runs": [{
+            "run_id": r.run_id, "name": r.name, "strategy": r.strategy,
+            "status": r.status, "error": r.error,
+            "start": r.start_date, "end": r.end_date, "cities": r.cities or [],
+            "n_trades": r.n_trades, "total_pnl": r.total_pnl,
+            "initial_bankroll": r.initial_bankroll, "final_bankroll": r.final_bankroll,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "metrics": r.metrics,
+        } for r in rows]}
+    finally:
+        db.close()
+
+
+@app.get("/api/backtest/runs/{run_id}")
+async def api_bt_run(run_id: str, ledger: bool = True):
+    from weatherbot.models.weather_db import SessionLocal
+    from weatherbot.models.backtest_db import BtRun, BtRunTrade, init_backtest_db
+    init_backtest_db()
+    db = SessionLocal()
+    try:
+        r = db.query(BtRun).filter(BtRun.run_id == run_id).first()
+        if r is None:
+            return JSONResponse({"error": "run not found"}, status_code=404)
+        out = {
+            "run_id": r.run_id, "name": r.name, "strategy": r.strategy,
+            "status": r.status, "error": r.error, "params": r.params,
+            "start": r.start_date, "end": r.end_date, "cities": r.cities or [],
+            "metrics": r.metrics, "equity_curve": r.equity_curve,
+            "n_trades": r.n_trades, "total_pnl": r.total_pnl,
+            "initial_bankroll": r.initial_bankroll, "final_bankroll": r.final_bankroll,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        if ledger:
+            trades = db.query(BtRunTrade).filter(BtRunTrade.run_id == run_id).all()
+            out["ledger"] = [{
+                "ticker": t.ticker, "city_key": t.city_key, "metric": t.metric,
+                "direction": t.direction, "threshold_f": t.threshold_f,
+                "target_date": t.target_date, "bet_side": t.bet_side,
+                "model_prob": t.model_prob, "market_prob": t.market_prob, "edge": t.edge,
+                "agreement": t.agreement, "fill_mode": t.fill_mode, "filled": t.filled,
+                "entry_price": t.entry_price, "contracts": t.contracts, "size": t.size,
+                "resolved": t.resolved, "result": t.result, "settlement": t.settlement,
+                "pnl": t.pnl,
+            } for t in trades]
+        return out
+    finally:
+        db.close()
+
+
+def _run_backtest_job(run_id: str, body: dict):
+    """Executed in a background thread — fills in the queued BtRun row."""
+    from weatherbot.backtest.runner import run_backtest
+    from weatherbot.core.strategy import StrategyParams
+    from weatherbot.models.weather_db import SessionLocal
+    from weatherbot.models.backtest_db import BtRun
+    try:
+        merged = {**StrategyParams.live_default().to_dict(), **(body.get("params") or {})}
+        params = StrategyParams.from_dict(merged)
+        run_backtest(
+            params=params,
+            start=body["start"], end=body["end"],
+            cities=body.get("cities") or None,
+            strategy=body.get("strategy", "default"),
+            name=body.get("name"),
+            run_id=run_id, persist=True,
+        )
+    except Exception as e:
+        logger.error(f"Backtest run {run_id} failed: {e}", exc_info=True)
+        db = SessionLocal()
+        try:
+            r = db.query(BtRun).filter(BtRun.run_id == run_id).first()
+            if r is not None:
+                r.status = "error"
+                r.error = str(e)
+                db.commit()
+        finally:
+            db.close()
+
+
+@app.post("/api/backtest/run")
+async def api_bt_run_start(request: Request, background_tasks: BackgroundTasks):
+    """Queue a backtest. Returns a run_id immediately; poll /api/backtest/runs/{id}."""
+    import uuid as _uuid
+    from weatherbot.models.weather_db import SessionLocal
+    from weatherbot.models.backtest_db import BtRun, init_backtest_db
+    body = await request.json()
+    if not body.get("start") or not body.get("end"):
+        return JSONResponse({"error": "start and end (YYYY-MM-DD) are required"}, status_code=400)
+
+    init_backtest_db()
+    run_id = _uuid.uuid4().hex
+    db = SessionLocal()
+    try:
+        db.add(BtRun(
+            run_id=run_id, name=body.get("name"), strategy=body.get("strategy", "default"),
+            params=body.get("params") or {}, start_date=body["start"], end_date=body["end"],
+            cities=body.get("cities") or [], status="queued",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+    background_tasks.add_task(_run_backtest_job, run_id, body)
+    return {"run_id": run_id, "status": "queued"}
 
 
 # ── Startup / shutdown hooks ─────────────────────────────────────────────────
