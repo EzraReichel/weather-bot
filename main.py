@@ -105,10 +105,11 @@ def _all_trades_sql(has_paper: bool, order: str = "created_at DESC", limit: int 
         "model_prob, market_price, edge, contracts, entry_price, kelly_size, "
         "created_at, resolution_date, resolved, result, pnl, actual_temp, resolved_at"
     )
-    # The current `trades` table has target_contracts; the legacy `paper_trades`
-    # table does not — select NULL there so the UNION columns line up.
-    trades_sel = f"{fields}, target_contracts"
-    paper_sel  = f"{fields}, NULL AS target_contracts"
+    # The current `trades` table has target_contracts/orders/fill_price; the
+    # legacy `paper_trades` table does not — select NULL there so the UNION
+    # columns line up. `orders` is the JSON per-leg breakdown (original + top-ups).
+    trades_sel = f"{fields}, target_contracts, orders, fill_price"
+    paper_sel  = f"{fields}, NULL AS target_contracts, NULL AS orders, NULL AS fill_price"
 
     if live_only:
         return f"SELECT {trades_sel}, is_paper FROM trades WHERE NOT is_paper ORDER BY {order} LIMIT {limit}"
@@ -133,7 +134,7 @@ def _rows_to_trades(rows) -> list:
         "id", "ticker", "city", "metric", "threshold_f", "side", "market_direction",
         "model_prob", "market_price", "edge", "contracts", "entry_price", "kelly_size",
         "created_at", "resolution_date", "resolved", "result", "pnl", "actual_temp",
-        "resolved_at", "target_contracts", "is_paper",
+        "resolved_at", "target_contracts", "orders", "fill_price", "is_paper",
     ]
     out = []
     for row in rows:
@@ -142,6 +143,12 @@ def _rows_to_trades(rows) -> list:
         d["resolved_at"] = d["resolved_at"].isoformat() if d["resolved_at"] else None
         d["resolved"] = bool(d["resolved"])
         d["is_paper"] = bool(d["is_paper"])
+        # Per-leg breakdown: [{"id","price","n"}, ...]. Parse to a list so the UI
+        # can show each order's fill price and contract count for topped-up rows.
+        try:
+            d["orders"] = json.loads(d["orders"]) if d.get("orders") else []
+        except (ValueError, TypeError):
+            d["orders"] = []
         d["ticker"] = d["ticker"] or ""
         d["city"] = d["city"] or ""
         d["metric"] = d["metric"] or ""

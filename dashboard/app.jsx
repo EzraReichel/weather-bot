@@ -22,6 +22,30 @@ const fillPct = (t) => {
   return Math.min(1, (t.contracts || 0) / target);
 };
 
+// Price (0–1) → cents string, e.g. 0.655 → "66¢".
+const cents = (p) => (typeof p === "number" ? Math.round(p * 100) + "¢" : "—");
+
+// Per-leg breakdown of a position: every order that built it (original + top-ups).
+// New rows carry t.orders = [{id, price, n}, ...]; legacy rows have only the
+// flat blended entry_price/contracts, which we surface as a single synthetic leg.
+const tradeLegs = (t) => {
+  if (Array.isArray(t.orders) && t.orders.length) {
+    return t.orders.map((o) => ({ price: o.price, n: o.n }));
+  }
+  if (t.contracts != null && t.entry_price != null) {
+    return [{ price: t.entry_price, n: t.contracts }];
+  }
+  return [];
+};
+
+// Total dollars committed across all legs (sum of price × contracts). Falls back
+// to the blended basis × total contracts when no per-leg data exists.
+const betCost = (t) => {
+  const legs = tradeLegs(t);
+  if (legs.length) return legs.reduce((s, l) => s + (l.price || 0) * (l.n || 0), 0);
+  return (t.contracts || 0) * (t.entry_price || 0);
+};
+
 const CITY_SHORT = {
   nyc: "NYC", chicago: "CHI", miami: "MIA", los_angeles: "LAX",
   denver: "DEN", austin: "AUS", houston: "HOU", boston: "BOS",
@@ -258,7 +282,9 @@ function TradesView({ trades }) {
             <tr style={S.thead}>
               <th style={S.th}>Market</th>
               <th style={S.th}>Side</th>
-              <th style={S.th}>Size</th>
+              <th style={S.th}>Bet size</th>
+              <th style={S.th}>Entry</th>
+              <th style={S.th}>Contracts</th>
               <th style={S.th}>Fill</th>
               <th style={S.th}>Edge</th>
               <th style={S.th}>Model prob</th>
@@ -270,7 +296,7 @@ function TradesView({ trades }) {
           <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={9} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                <td colSpan={11} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
                   {trades.length === 0 ? "No trades placed yet." : "No trades match your search."}
                 </td>
               </tr>
@@ -311,10 +337,32 @@ function TradeRow({ trade: t }) {
           {t.side?.toUpperCase() || "—"}
         </span>
       </td>
+      <td style={{ ...S.td, color: C.text, fontSize: 12, fontWeight: 600 }}>
+        {betCost(t) > 0 ? usd(betCost(t)) : "—"}
+      </td>
       <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>
-        {t.contracts != null && t.entry_price != null
-          ? <>{usd(t.contracts * t.entry_price)}<span style={{ color: C.subtle }}> &times;{t.contracts}</span></>
-          : "—"}
+        {(() => {
+          const legs = tradeLegs(t);
+          if (!legs.length) return "—";
+          if (legs.length === 1) return cents(legs[0].price);
+          // Topped-up position: blended avg on top, each leg below.
+          return (
+            <div>
+              <div style={{ color: C.text }}>{cents(t.entry_price)} <span style={{ color: C.subtle }}>avg</span></div>
+              {legs.map((l, i) => (
+                <div key={i} style={{ fontSize: 11, color: C.subtle, marginTop: 1 }}>
+                  {l.n} &times; {cents(l.price)}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
+      </td>
+      <td style={{ ...S.td, color: C.muted, fontSize: 12 }}>
+        {t.contracts != null ? t.contracts : "—"}
+        {t.target_contracts && t.target_contracts !== t.contracts
+          ? <span style={{ color: C.subtle }}> / {t.target_contracts}</span>
+          : null}
       </td>
       <td style={{ ...S.td, fontSize: 12, color: (() => { const f = fillPct(t); return f === null ? C.subtle : f < 1.0 ? C.amber : C.subtle; })() }}>
         {(() => { const f = fillPct(t); return f === null ? "—" : pct(f); })()}
@@ -356,7 +404,9 @@ function PaperTradesView({ trades }) {
             <tr style={S.thead}>
               <th style={S.th}>Market</th>
               <th style={S.th}>Side</th>
-              <th style={S.th}>Size</th>
+              <th style={S.th}>Bet size</th>
+              <th style={S.th}>Entry</th>
+              <th style={S.th}>Contracts</th>
               <th style={S.th}>Fill</th>
               <th style={S.th}>Edge</th>
               <th style={S.th}>Model prob</th>
@@ -368,7 +418,7 @@ function PaperTradesView({ trades }) {
           <tbody>
             {trades.length === 0 ? (
               <tr>
-                <td colSpan={9} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
+                <td colSpan={11} style={{ padding: "48px 24px", textAlign: "center", color: C.muted, fontSize: 14 }}>
                   No paper trades found.
                 </td>
               </tr>
