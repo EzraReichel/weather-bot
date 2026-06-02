@@ -115,6 +115,8 @@ function MissionControl() {
   const totalPnl = resolved.reduce((s, t) => s + (t.pnl || 0), 0);
   const winRate = resolved.length ? wins.length / resolved.length : null;
   const current = bankroll?.current ?? config?.INITIAL_BANKROLL ?? 0;
+  const equity = bankroll?.equity ?? current;
+  const cash = bankroll?.cash ?? current;
   const isLive = config?.LIVE_TRADING;
 
   return (
@@ -130,7 +132,7 @@ function MissionControl() {
         </div>
 
         <div style={S.headerStats}>
-          <HeaderStat label="Bankroll" value={usd(current)} color={C.blue} />
+          <HeaderStat label="Bankroll" value={usd(equity)} color={C.blue} sub={`${usd(cash)} cash`} />
           <div style={S.statDivider} />
           <HeaderStat label="All-time P&L" value={usd(totalPnl, true)} color={totalPnl >= 0 ? C.green : C.red} />
           <div style={S.statDivider} />
@@ -174,11 +176,12 @@ function MissionControl() {
   );
 }
 
-function HeaderStat({ label, value, color, warn }) {
+function HeaderStat({ label, value, color, warn, sub }) {
   return (
     <div style={{ textAlign: "center" }}>
       <div style={{ fontSize: 11, color: C.muted, marginBottom: 2, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
       <div style={{ fontSize: 18, fontWeight: 700, color }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 1 }}>{sub}</div>}
       {warn && <div style={{ fontSize: 10, color: C.amber, marginTop: 2, maxWidth: 160 }}>{warn}</div>}
     </div>
   );
