@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     # Bot settings
     INITIAL_BANKROLL: float = 1000.0
     KELLY_FRACTION: float = 0.15
+    # Bankroll basis for Kelly sizing. False = available cash only (default);
+    # True = total account equity (cash + current value of open positions).
+    KELLY_USE_EQUITY: bool = False
     SCAN_INTERVAL_SECONDS: int = 30
     MIN_EDGE_THRESHOLD: float = 0.08
     KALSHI_FEE_RATE: float = 0.07  # 7% of profit

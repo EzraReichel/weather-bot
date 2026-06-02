@@ -367,6 +367,56 @@ function PaperTradesView({ trades }) {
 }
 
 // ── Bankroll view ─────────────────────────────────────────────────────────────
+function LegendItem({ color, label, value, pct }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+      <span style={{ width: 10, height: 10, borderRadius: 3, background: color, flexShrink: 0 }} />
+      <div>
+        <div style={{ fontSize: 11, color: C.muted, textTransform: "uppercase", letterSpacing: "0.05em" }}>{label}</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: C.text }}>
+          {value}{" "}
+          <span style={{ fontSize: 12, fontWeight: 500, color: C.subtle }}>{Math.round(pct)}%</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Portfolio value as a whole (hero) and its two parts (cash + open positions)
+// shown as a single stacked bar so the split reads at a glance.
+function AccountValueCard({ bankroll }) {
+  const cash = bankroll?.cash ?? 0;
+  const positions = bankroll?.positions ?? 0;
+  const equity = bankroll?.equity ?? (cash + positions);
+  const denom = equity > 0 ? equity : 1;
+  const cashPct = Math.max(0, Math.min(100, (cash / denom) * 100));
+  const posPct = Math.max(0, Math.min(100, (positions / denom) * 100));
+
+  return (
+    <div style={S.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+        <div>
+          <div style={S.statLabel}>Portfolio value</div>
+          <div style={{ fontSize: 30, fontWeight: 700, color: C.text, marginTop: 4 }}>{usd(equity)}</div>
+        </div>
+        <div style={{ fontSize: 12, color: C.muted }}>cash + open positions</div>
+      </div>
+
+      {/* Composition bar */}
+      <div style={{ display: "flex", height: 14, borderRadius: 7, overflow: "hidden", background: C.bg, marginBottom: 14 }}>
+        <div style={{ width: `${cashPct}%`, background: C.blue }} />
+        <div style={{ width: `${posPct}%`, background: C.amber }} />
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: "flex", gap: 32, flexWrap: "wrap" }}>
+        <LegendItem color={C.blue} label="Cash" value={usd(cash)} pct={cashPct} />
+        <LegendItem color={C.amber} label="Open positions" value={usd(positions)} pct={posPct} />
+      </div>
+    </div>
+  );
+}
+
 function BankrollView({ bankroll, trades, config, commits }) {
   const resolved = trades.filter((t) => t.resolved);
   const wins = resolved.filter((t) => t.result === "win");
@@ -390,6 +440,9 @@ function BankrollView({ bankroll, trades, config, commits }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* Account value composition */}
+      <AccountValueCard bankroll={bankroll} />
+
       {/* Stat grid */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
         {stats.map((s, i) => (
@@ -840,6 +893,7 @@ function ConfigView({ config, cities, saveConfig, toggleCity }) {
   const ENV_FIELDS = [
     { key: "LIVE_TRADING",             label: "Live trading mode",         type: "bool",   danger: true, help: "Enables real-money orders on Kalshi" },
     { key: "KELLY_FRACTION",           label: "Kelly fraction",             type: "number", step: 0.01, min: 0.01, max: 1 },
+    { key: "KELLY_USE_EQUITY",         label: "Size Kelly on equity",       type: "bool",   help: "On = bankroll is cash + open position value; Off = cash only" },
     { key: "MIN_EDGE_THRESHOLD",       label: "Min edge threshold",         type: "number", step: 0.01, min: 0, max: 0.5 },
     { key: "KALSHI_FEE_RATE",          label: "Kalshi fee rate",            type: "number", step: 0.01, min: 0, max: 0.2 },
     { key: "WEATHER_MAX_TRADE_SIZE",   label: "Max trade size ($)",         type: "number", step: 10, min: 0 },

@@ -165,11 +165,14 @@ async def api_paper_trades(limit: int = 5000):
 @app.get("/api/bankroll")
 async def api_bankroll():
     """Bankroll — current value from live Kalshi account, history from settled trades."""
-    from weatherbot.data.kalshi_client import fetch_live_balance
+    from weatherbot.data.kalshi_client import fetch_balance_breakdown
     from weatherbot.models.weather_db import SessionLocal, engine
     from sqlalchemy import text, inspect as sa_inspect
 
-    live_balance = await fetch_live_balance()
+    # Full account composition; `current` (the trading bankroll) follows the
+    # KELLY_USE_EQUITY basis so the chart/header match how sizing actually works.
+    balance = await fetch_balance_breakdown()
+    live_balance = balance["equity"] if settings.KELLY_USE_EQUITY else balance["cash"]
 
     db = SessionLocal()
     try:
@@ -191,7 +194,14 @@ async def api_bankroll():
                     "result": t["result"],
                     "ticker": t["ticker"],
                 })
-        return {"points": points, "current": round(live_balance, 2), "initial": initial}
+        return {
+            "points": points,
+            "current": round(live_balance, 2),
+            "initial": initial,
+            "cash": round(balance["cash"], 2),
+            "positions": round(balance["positions"], 2),
+            "equity": round(balance["equity"], 2),
+        }
     finally:
         db.close()
 
@@ -203,6 +213,7 @@ async def api_config():
         "LIVE_TRADING": settings.LIVE_TRADING,
         "INITIAL_BANKROLL": settings.INITIAL_BANKROLL,
         "KELLY_FRACTION": settings.KELLY_FRACTION,
+        "KELLY_USE_EQUITY": settings.KELLY_USE_EQUITY,
         "SCAN_INTERVAL_SECONDS": settings.SCAN_INTERVAL_SECONDS,
         "MIN_EDGE_THRESHOLD": settings.MIN_EDGE_THRESHOLD,
         "KALSHI_FEE_RATE": settings.KALSHI_FEE_RATE,

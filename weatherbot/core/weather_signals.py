@@ -667,20 +667,25 @@ async def scan_for_weather_signals() -> ScanReport:
     logger.info("WEATHER SCAN: Fetching Kalshi temperature markets...")
 
     # ── Fetch live Kalshi balance for Kelly sizing ────────────────────────────
-    # Use the actual account balance as the bankroll so Kelly bets track real
-    # equity, not a stale env var. Falls back to INITIAL_BANKROLL if the API
-    # is unreachable.
+    # Bankroll basis is controlled by KELLY_USE_EQUITY: cash-only (default) or
+    # total account equity (cash + current value of open positions). Either way
+    # it tracks the real account, not a stale env var. Falls back to
+    # INITIAL_BANKROLL if the API is unreachable.
     live_bankroll = settings.INITIAL_BANKROLL
     if kalshi_credentials_present():
         try:
-            from weatherbot.data.kalshi_client import KalshiClient
+            from weatherbot.data.kalshi_client import KalshiClient, account_cash_dollars, account_equity_dollars
             _client = KalshiClient()
             balance_data = await _client.get_balance()
-            if "balance_dollars" in balance_data:
-                live_bankroll = float(balance_data["balance_dollars"])
-            else:
-                live_bankroll = balance_data.get("balance", 0) / 100.0
-            logger.info(f"Live Kalshi balance: ${live_bankroll:.2f} (INITIAL_BANKROLL env: ${settings.INITIAL_BANKROLL:.2f})")
+            _cash = account_cash_dollars(balance_data)
+            _equity = account_equity_dollars(balance_data)
+            live_bankroll = _equity if settings.KELLY_USE_EQUITY else _cash
+            logger.info(
+                f"Kelly bankroll: ${live_bankroll:.2f} "
+                f"(basis={'equity' if settings.KELLY_USE_EQUITY else 'cash'}; "
+                f"cash ${_cash:.2f}, positions ${_equity - _cash:.2f}; "
+                f"INITIAL_BANKROLL env: ${settings.INITIAL_BANKROLL:.2f})"
+            )
         except Exception as e:
             logger.warning(f"Could not fetch live Kalshi balance, falling back to INITIAL_BANKROLL: {e}")
 

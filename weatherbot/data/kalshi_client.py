@@ -191,18 +191,69 @@ def kalshi_credentials_present() -> bool:
     return has_key and has_pem
 
 
+def account_cash_dollars(balance_data: dict) -> float:
+    """Available cash from a /portfolio/balance response, in dollars.
+
+    This is the only money that can actually fund a *new* order — use it for
+    affordability preflight checks, NOT for Kelly sizing.
+    """
+    if "balance_dollars" in balance_data:
+        return float(balance_data["balance_dollars"])
+    return balance_data.get("balance", 0) / 100.0
+
+
+def account_equity_dollars(balance_data: dict) -> float:
+    """Total account value from a /portfolio/balance response, in dollars.
+
+    Equity = available cash + current market value of all open positions.
+    Kalshi's /portfolio/balance returns `balance`/`balance_dollars` (cash) and
+    `portfolio_value` (cents — current value of all positions held). Use this as
+    the Kelly bankroll so sizing tracks full equity, not just idle cash.
+
+    If `portfolio_value` is absent the result degrades to cash-only.
+    """
+    cash = account_cash_dollars(balance_data)
+    positions = balance_data.get("portfolio_value", 0) / 100.0
+    return cash + positions
+
+
+async def fetch_balance_breakdown() -> dict:
+    """Return the live account composition in dollars: {cash, positions, equity}.
+
+    `equity` = cash + current market value of open positions. Falls back to
+    INITIAL_BANKROLL (as cash, zero positions) if credentials are missing or the
+    API fails — so callers always get a usable, internally-consistent triple.
+    """
+    fallback = {
+        "cash": settings.INITIAL_BANKROLL,
+        "positions": 0.0,
+        "equity": settings.INITIAL_BANKROLL,
+    }
+    if not kalshi_credentials_present():
+        return fallback
+    try:
+        data = await KalshiClient().get_balance()
+        cash = account_cash_dollars(data)
+        equity = account_equity_dollars(data)
+        return {"cash": cash, "positions": equity - cash, "equity": equity}
+    except Exception as e:
+        logger.warning(f"fetch_balance_breakdown failed, using INITIAL_BANKROLL: {e}")
+        return fallback
+
+
 async def fetch_live_balance() -> float:
     """
-    Return the live Kalshi account balance in dollars.
+    Return the live Kalshi bankroll in dollars, matching the KELLY_USE_EQUITY
+    basis: total equity (cash + open position value) when enabled, else cash.
     Falls back to settings.INITIAL_BANKROLL if credentials are missing or the API fails.
     """
     if not kalshi_credentials_present():
         return settings.INITIAL_BANKROLL
     try:
         data = await KalshiClient().get_balance()
-        if "balance_dollars" in data:
-            return float(data["balance_dollars"])
-        return data.get("balance", 0) / 100.0
+        if settings.KELLY_USE_EQUITY:
+            return account_equity_dollars(data)
+        return account_cash_dollars(data)
     except Exception as e:
         logger.warning(f"fetch_live_balance failed, using INITIAL_BANKROLL: {e}")
         return settings.INITIAL_BANKROLL
