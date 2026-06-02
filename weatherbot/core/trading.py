@@ -156,15 +156,24 @@ async def log_live_trade(signal) -> Optional[Trade]:
                 )
                 return None
 
-            # Self-bounding fill gap. Also clamp to the Kelly dollar cap as a
-            # belt-and-suspenders ceiling (target_contracts already derives from
-            # capped_size, so this only bites if the price moved against us).
-            gap = target_contracts - working
-            gap = min(gap, int(capped_size / entry_price) - working)
+            # Self-bounding fill gap, capped by the REMAINING DOLLAR BUDGET — not
+            # by a contract count recomputed at the current price. target_contracts
+            # is int(capped_size / entry_price), which GROWS as the price falls; if
+            # we sized the gap off that alone, every downtick would reopen room to
+            # buy more, because the contracts already held get re-valued at the new
+            # (lower) price even though they were bought higher. That let total
+            # dollars climb past the cap — a $100 cap could spend ~$200 as the price
+            # halved. Budget in dollars instead: the cap applies to the WHOLE
+            # position, so a top-up may spend at most what's left of capped_size
+            # after the dollars already committed (anchor.kelly_size).
+            spent = anchor.kelly_size or 0.0
+            remaining_budget = capped_size - spent
+            gap = min(target_contracts - working, int(remaining_budget / entry_price))
             if gap <= 0:
                 logger.debug(
-                    f"Live top-up skipped: {market.market_id} — working={working} "
-                    f"≥ target={target_contracts} (or Kelly $ ceiling reached)"
+                    f"Live top-up skipped: {market.market_id} — working={working}/"
+                    f"{target_contracts} contracts, ${spent:.2f}/${capped_size:.2f} "
+                    f"budget spent (dollar cap or contract target reached)"
                 )
                 return None
 
