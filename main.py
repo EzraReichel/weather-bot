@@ -59,15 +59,22 @@ async def trigger_report():
     return JSONResponse({"sent": ok})
 
 
+# The dashboard is transpiled in-browser by Babel from /app.jsx. Without an
+# explicit no-cache header, browsers heuristically cache the file, so after a
+# deploy the page keeps running the old UI (e.g. missing the Portfolio value
+# card) until a hard refresh. Force revalidation so a redeploy always shows.
+_NO_CACHE = {"Cache-Control": "no-cache, must-revalidate"}
+
+
 @app.get("/app.jsx")
 async def serve_jsx():
     """Serve the JSX component with correct MIME type for Babel standalone."""
-    return FileResponse(FRONTEND_DIR / "app.jsx", media_type="application/javascript")
+    return FileResponse(FRONTEND_DIR / "app.jsx", media_type="application/javascript", headers=_NO_CACHE)
 
 
 @app.get("/", include_in_schema=False)
 async def serve_ui():
-    return FileResponse(FRONTEND_DIR / "index.html")
+    return FileResponse(FRONTEND_DIR / "index.html", headers=_NO_CACHE)
 
 
 CITIES_JSON = Path(__file__).parent / "weatherbot" / "cities.json"
