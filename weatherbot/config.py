@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # Bankroll basis for Kelly sizing. False = available cash only (default);
     # True = total account equity (cash + current value of open positions).
     KELLY_USE_EQUITY: bool = False
-    SCAN_INTERVAL_SECONDS: int = 30
+    SCAN_INTERVAL_SECONDS: int = 300
     MIN_EDGE_THRESHOLD: float = 0.08
     KALSHI_FEE_RATE: float = 0.07  # 7% of profit
     WEATHER_MIN_ENTRY_PRICE: float = 0.10
@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     SAME_DAY_HIGH_CUTOFF_HOUR: int = 9        # stop entering same-day high markets at/after this hour ET
     SAME_DAY_LOW_CUTOFF_HOUR: int = 7         # stop entering same-day low markets at/after this hour ET
     TRADING_HOURS_CONVICTION_THRESHOLD: float = 0.75  # bypass all time gates when both model AND market >= this
+
+    # Backtest data capture — snapshot every scan into the bt_* archive tables.
+    # Best-effort and isolated from trading; set false to disable all capture.
+    BACKTEST_CAPTURE: bool = True
 
     # Health check
     PORT: int = 8080

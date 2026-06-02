@@ -8,7 +8,6 @@ from typing import Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import distinct
 from zoneinfo import ZoneInfo
 
 from weatherbot.config import settings
@@ -17,12 +16,10 @@ from weatherbot.core.trade_manager import execute_signal, settle_trades
 from weatherbot.core.trading import get_live_stats
 from weatherbot.core.weather_signals import scan_for_weather_signals
 from weatherbot.data.kalshi_client import fetch_live_balance
-from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade
-from weatherbot.models.weather_db import SessionLocal, Signal
+from weatherbot.models.trade import SessionLocal as TradeSessionLocal
 from weatherbot.notifications.discord import (
     poll_discord_commands,
     send_daily_summary,
-    send_live_position_increase_alert,
     send_live_trade_alert,
     send_paper_trade_alert,
     send_trade_settled_alert,
@@ -36,17 +33,19 @@ scheduler: Optional[AsyncIOScheduler] = None
 _alerted_tickers: dict = {}   # ticker -> datetime of last alert
 _ALERT_DEDUP_HOURS = 6
 
-# Latest scan report — used by daily summary job
-_latest_scan_report = None
-
 
 async def weather_scan_job():
     """Scan Kalshi weather markets, generate signals, fire Discord alerts."""
-    global _latest_scan_report
     start = time.time()
     logger.info("── Weather scan started ──────────────────────────────────")
 
     try:
+        # Prune stale dedup entries so the dict doesn't grow unbounded
+        cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
+        stale = [k for k, v in _alerted_tickers.items() if v <= cutoff]
+        for k in stale:
+            del _alerted_tickers[k]
+
         scan = await scan_for_weather_signals()
         actionable = scan.actionable
 
@@ -55,9 +54,6 @@ async def weather_scan_job():
             f"Scanned {len(scan.signals)} signals, {len(actionable)} above threshold "
             f"({elapsed:.1f}s)"
         )
-
-        # Store latest scan report for daily summary
-        _latest_scan_report = scan
 
         candidates = [s for s in scan.signals if (
             s.passes_threshold if settings.LIVE_TRADING else s.passes_paper_threshold
@@ -68,19 +64,7 @@ async def weather_scan_job():
             trade = await execute_signal(signal)
 
             if trade is None:
-                continue   # already at target or error — no alert
-
-            # A top-up folds into the existing position row and carries a
-            # transient `topup_added` hint. Position-increase updates always
-            # alert (bypassing the per-ticker dedup window) so each add is
-            # visible; fresh orders stay rate-limited.
-            added = getattr(trade, "topup_added", None)
-            if added:
-                try:
-                    send_live_position_increase_alert(signal, trade, added)
-                except Exception as e:
-                    logger.error(f"Failed to send position-increase alert for {ticker}: {e}")
-                continue
+                continue   # dedup or error — no alert
 
             last_alerted = _alerted_tickers.get(ticker)
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
@@ -100,6 +84,14 @@ async def weather_scan_job():
                 f"{'💸' if settings.LIVE_TRADING else '🔒'} {mode} — "
                 f"{len(candidates)} trade(s) evaluated"
             )
+
+        # ── Backtest data capture (best-effort, never blocks trading) ─────────
+        # Runs after trade execution so capture latency can't delay an order.
+        try:
+            from weatherbot.core.backtest_capture import capture_scan
+            await capture_scan(scan, trigger="interval")
+        except Exception as e:
+            logger.debug(f"Backtest capture skipped: {e}")
 
     except Exception as e:
         logger.error(f"Weather scan error: {e}", exc_info=True)
@@ -137,11 +129,22 @@ async def settlement_job():
         logger.error(f"Settlement error: {e}", exc_info=True)
 
 
+async def backtest_settlement_backfill_job():
+    """Daily: fetch ground-truth outcomes for captured markets that have settled."""
+    if not settings.BACKTEST_CAPTURE:
+        return
+    try:
+        from weatherbot.core.backtest_settle import backfill_settlements
+        await backfill_settlements(days_back=7, limit=0)
+    except Exception as e:
+        logger.error(f"Backtest settlement backfill error: {e}", exc_info=True)
+
+
 async def daily_summary_job():
     """
     Send combined daily summary to Discord at 11:00 PM Eastern.
-    Covers: unique signals found today, paper trades logged today, paper trades
-    resolved today, running P&L, and Brier calibration score.
+    Covers: trades logged today, trades resolved today, running P&L, bankroll,
+    and Brier calibration score for the active trading mode.
     """
     logger.info("Sending daily summary...")
 
@@ -151,64 +154,47 @@ async def daily_summary_job():
         today_start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
         today_start_utc = today_start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
 
-        # ── Unique signal tickers seen today ──────────────────────────────────
-        main_db = SessionLocal()
+        # ── Trades logged / resolved today (active mode only) ─────────────────
+        # Report on whichever mode the bot is actually running so P&L, counts,
+        # and bankroll stay internally consistent. Mixing historical paper P&L
+        # into a live running total is what made the summary look "weird".
+        live = settings.LIVE_TRADING
+        trade_db = TradeSessionLocal()
         try:
-            unique_tickers = (
-                main_db.query(distinct(Signal.market_ticker))
-                .filter(Signal.timestamp >= today_start_utc)
-                .count()
-            )
-            actionable_tickers = (
-                main_db.query(distinct(Signal.market_ticker))
-                .filter(
-                    Signal.timestamp >= today_start_utc,
-                    Signal.edge >= settings.MIN_EDGE_THRESHOLD,
-                )
-                .count()
-            )
-        finally:
-            main_db.close()
-
-        # ── Paper trades logged today ─────────────────────────────────────────
-        paper_db = TradeSessionLocal()
-        try:
-            paper_stats = get_paper_stats(paper_db)
+            stats = get_live_stats(trade_db) if live else get_paper_stats(trade_db)
 
             logged_today = [
-                t for t in paper_stats["all_trades"]
-                if t.created_at >= today_start_utc
+                t for t in stats["all_trades"]
+                if t.created_at and t.created_at >= today_start_utc
             ]
             resolved_today = [
-                t for t in paper_stats["resolved_trades"]
+                t for t in stats["resolved_trades"]
                 if t.resolved_at and t.resolved_at >= today_start_utc
             ]
-            daily_paper_pnl = sum(t.pnl for t in resolved_today if t.pnl is not None)
+            daily_pnl = sum(t.pnl for t in resolved_today if t.pnl is not None)
 
             # Daily Brier: mean squared error only for trades settled today
-            if resolved_today:
-                daily_brier_scores = [
-                    (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
-                    for t in resolved_today
-                ]
-                daily_brier = sum(daily_brier_scores) / len(daily_brier_scores)
-            else:
-                daily_brier = None
+            daily_brier_scores = [
+                (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
+                for t in resolved_today
+                if t.model_prob is not None
+            ]
+            daily_brier = (
+                sum(daily_brier_scores) / len(daily_brier_scores)
+                if daily_brier_scores else None
+            )
         finally:
-            paper_db.close()
+            trade_db.close()
 
         bankroll = await fetch_live_balance()
         send_daily_summary(
-            unique_signals=unique_tickers,
-            actionable_signals=actionable_tickers,
-            paper_logged_today=logged_today,
-            paper_resolved_today=resolved_today,
-            daily_paper_pnl=daily_paper_pnl,
-            paper_stats=paper_stats,
-            scan_report=_latest_scan_report,
+            logged_today=logged_today,
+            resolved_today=resolved_today,
+            daily_pnl=daily_pnl,
+            stats=stats,
             daily_brier=daily_brier,
-            live_stats=get_live_stats(),
             bankroll=bankroll,
+            live_trading=live,
         )
 
     except Exception as e:
@@ -274,6 +260,17 @@ def start_scheduler():
         replace_existing=True,
         max_instances=1,
     )
+
+    # Backtest settlement backfill — once daily, after midnight ET so the
+    # previous day's markets have settled on Kalshi.
+    if settings.BACKTEST_CAPTURE:
+        scheduler.add_job(
+            backtest_settlement_backfill_job,
+            CronTrigger(hour=2, minute=0, timezone="America/New_York"),
+            id="bt_settlement_backfill",
+            replace_existing=True,
+            max_instances=1,
+        )
 
     scheduler.start()
     logger.info(

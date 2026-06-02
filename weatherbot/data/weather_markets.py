@@ -29,6 +29,10 @@ class WeatherMarket:
     # When yes_bid == 0 it means bid data is unavailable; fall back to yes_price.
     yes_ask: float = 0.0     # Best ask for YES (filled from API when available)
     yes_bid: float = 0.0     # Best bid for YES (0 = unavailable)
+    # Liquidity at scan time — carried for backtest fill modeling (not used by
+    # signal generation). 0 = unavailable.
+    yes_ask_size: float = 0.0
+    volume_24h: float = 0.0
 
     @property
     def market_direction(self) -> str:

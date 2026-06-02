@@ -323,6 +323,14 @@ async def on_startup():
     init_trade_db()
     logger.info("Trade DB initialized")
 
+    if settings.BACKTEST_CAPTURE:
+        try:
+            from weatherbot.models.backtest_db import init_backtest_db
+            init_backtest_db()
+            logger.info("Backtest capture DB initialized")
+        except Exception as e:
+            logger.warning(f"Backtest DB init failed (capture will retry lazily): {e}")
+
     from weatherbot.core.scheduler import start_scheduler
     start_scheduler()
     logger.info(f"Mission Control UI at http://0.0.0.0:{settings.PORT}")

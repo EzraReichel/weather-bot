@@ -404,6 +404,8 @@ async def fetch_kalshi_weather_markets(
                         volume=float(m.get("volume", 0) or 0),
                         yes_ask=yes_price,   # yes_price is already the ask
                         yes_bid=yes_bid,
+                        yes_ask_size=yes_ask_size,
+                        volume_24h=volume_24h,
                     ))
 
                 cursor = data.get("cursor")
