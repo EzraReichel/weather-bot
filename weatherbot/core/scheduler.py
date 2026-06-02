@@ -92,14 +92,6 @@ async def weather_scan_job():
                 f"{len(candidates)} trade(s) evaluated"
             )
 
-        # ── Equity snapshot (best-effort, throttled, never blocks trading) ────
-        # Records live portfolio value over time for the bankroll chart.
-        try:
-            from weatherbot.core.equity_history import record_equity_snapshot
-            await record_equity_snapshot()
-        except Exception as e:
-            logger.debug(f"Equity snapshot skipped: {e}")
-
         # ── Backtest data capture (best-effort, never blocks trading) ─────────
         # Runs after trade execution so capture latency can't delay an order.
         try:
@@ -141,6 +133,26 @@ async def settlement_job():
         notify_pending_settlements(lambda t: send_trade_settled_alert(t, bankroll=bankroll))
     except Exception as e:
         logger.error(f"Settlement error: {e}", exc_info=True)
+
+
+async def daily_equity_snapshot_job():
+    """Record one portfolio-value point for the bankroll chart, at 05:00 ET.
+
+    The chart only needs a single daily point now (no intraday 5-min cadence).
+    Runs at 05:00 ET, by when most of the prior day's Kalshi settlement
+    notifications have landed. We settle first so those resolved trades have
+    moved to cash, then take one forced snapshot so the point reflects
+    post-resolution equity. Best-effort and never blocks anything.
+    """
+    try:
+        await settle_trades()
+    except Exception as e:
+        logger.warning(f"Pre-snapshot settlement failed: {e}")
+    try:
+        from weatherbot.core.equity_history import record_equity_snapshot
+        await record_equity_snapshot(min_interval_s=0)
+    except Exception as e:
+        logger.warning(f"Daily equity snapshot failed: {e}")
 
 
 async def backtest_settlement_backfill_job():
@@ -275,6 +287,17 @@ def start_scheduler():
         max_instances=1,
     )
 
+    # Daily bankroll-chart point — one snapshot at 05:00 ET. By then most of the
+    # prior day's Kalshi settlement notifications have landed, so the point
+    # reflects the prior day's final resolutions. Replaces the old 5-min cadence.
+    scheduler.add_job(
+        daily_equity_snapshot_job,
+        CronTrigger(hour=5, minute=0, timezone="America/New_York"),
+        id="daily_equity_snapshot",
+        replace_existing=True,
+        max_instances=1,
+    )
+
     # Backtest settlement backfill — once daily, after midnight ET so the
     # previous day's markets have settled on Kalshi.
     if settings.BACKTEST_CAPTURE:
@@ -290,7 +313,7 @@ def start_scheduler():
     logger.info(
         f"Scheduler started — scan every {scan_secs}s, "
         f"paper settlement every 1h, model-run scans at 03:30/09:30/15:30/21:30 ET, "
-        f"daily summary at 23:00 ET"
+        f"daily summary at 23:00 ET, daily equity snapshot at 05:00 ET"
     )
 
     # Run first scan and settlement immediately on startup
