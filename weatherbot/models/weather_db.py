@@ -70,6 +70,22 @@ class ScanLog(Base):
     error = Column(String, nullable=True)
 
 
+class EquitySnapshot(Base):
+    """Periodic snapshot of live account value, for the portfolio-value chart.
+
+    equity = cash + current market value of open positions. Recorded on a
+    throttled cadence from the scan loop so the bankroll graph plots real
+    portfolio value over time instead of a realized-P&L curve.
+    """
+    __tablename__ = "equity_snapshots"
+
+    id        = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    cash      = Column(Float)      # available cash, dollars
+    positions = Column(Float)      # market value of open positions, dollars
+    equity    = Column(Float)      # cash + positions, dollars
+
+
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)

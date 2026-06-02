@@ -92,6 +92,14 @@ async def weather_scan_job():
                 f"{len(candidates)} trade(s) evaluated"
             )
 
+        # ── Equity snapshot (best-effort, throttled, never blocks trading) ────
+        # Records live portfolio value over time for the bankroll chart.
+        try:
+            from weatherbot.core.equity_history import record_equity_snapshot
+            await record_equity_snapshot()
+        except Exception as e:
+            logger.debug(f"Equity snapshot skipped: {e}")
+
         # ── Backtest data capture (best-effort, never blocks trading) ─────────
         # Runs after trade execution so capture latency can't delay an order.
         try:

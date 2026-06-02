@@ -224,6 +224,45 @@ async def api_bankroll():
         db.close()
 
 
+@app.get("/api/equity-history")
+async def api_equity_history(range: str = "week"):
+    """Portfolio value (cash + open positions) over time, from equity snapshots.
+
+    `range` selects the window: day=24h, week=7d, month=30d. Series is
+    downsampled to a sane point count so wide windows stay light.
+    """
+    from datetime import datetime, timedelta
+    from weatherbot.models.weather_db import SessionLocal, EquitySnapshot
+
+    days = {"day": 1, "week": 7, "month": 30}.get(range, 7)
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    MAX_POINTS = 400
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(EquitySnapshot)
+            .filter(EquitySnapshot.timestamp >= cutoff)
+            .order_by(EquitySnapshot.timestamp)
+            .all()
+        )
+        # Downsample by striding, but always keep the most recent point.
+        if len(rows) > MAX_POINTS:
+            stride = len(rows) // MAX_POINTS + 1
+            rows = rows[::stride] + ([rows[-1]] if (len(rows) - 1) % stride else [])
+        points = [
+            {
+                "t": r.timestamp.isoformat(),
+                "equity": round(r.equity or 0, 2),
+                "cash": round(r.cash or 0, 2),
+                "positions": round(r.positions or 0, 2),
+            }
+            for r in rows
+        ]
+        return {"points": points, "range": range}
+    finally:
+        db.close()
+
 
 @app.get("/api/config")
 async def api_config():

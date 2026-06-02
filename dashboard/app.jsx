@@ -52,6 +52,14 @@ function fmtDate(isoStr) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+// X-axis tick label — no year (for ease of reading). On the daily range show
+// the time of day instead of the date, since every point is the same day.
+function fmtAxisTick(isoStr, range) {
+  const d = new Date(isoStr);
+  if (range === "day") return d.toLocaleTimeString("en-US", { hour: "numeric" });
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 function getWeekStart(isoStr) {
   const d = new Date(isoStr);
   const day = d.getUTCDay(); // 0=Sun, 1=Mon
@@ -435,6 +443,17 @@ function BankrollView({ bankroll, trades, config, commits }) {
   const initial = bankroll?.initial ?? config?.INITIAL_BANKROLL ?? 1000;
   const current = bankroll?.current ?? initial;
 
+  // Portfolio-value chart: equity snapshots over a selectable window.
+  const [range, setRange] = useState("week");
+  const [equitySeries, setEquitySeries] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    api.get(`/api/equity-history?range=${range}`).then((d) => {
+      if (alive) setEquitySeries(d.points || []);
+    }).catch(() => { if (alive) setEquitySeries([]); });
+    return () => { alive = false; };
+  }, [range]);
+
   const stats = [
     { label: "Current bankroll", value: usd(current), color: C.blue, big: true },
     { label: "All-time P&L", value: usd(totalPnl, true), color: totalPnl >= 0 ? C.green : C.red, big: true },
@@ -461,10 +480,22 @@ function BankrollView({ bankroll, trades, config, commits }) {
         ))}
       </div>
 
-      {/* Chart */}
+      {/* Portfolio value over time */}
       <div style={S.card}>
-        <div style={S.cardTitle}>Bankroll over time</div>
-        <BankrollChart points={bankroll?.points || []} initial={initial} />
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={S.cardTitle}>Portfolio value over time</div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[["day", "Daily"], ["week", "Weekly"], ["month", "Monthly"]].map(([key, label]) => (
+              <button key={key} onClick={() => setRange(key)} style={{
+                padding: "4px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                borderRadius: 6, border: `1px solid ${range === key ? C.blue : C.border}`,
+                background: range === key ? C.blue : "transparent",
+                color: range === key ? "#fff" : C.muted,
+              }}>{label}</button>
+            ))}
+          </div>
+        </div>
+        <BankrollChart points={equitySeries} range={range} initial={initial} />
       </div>
 
       {/* Weekly P&L */}
@@ -783,11 +814,18 @@ function WeekDetail({ weekData, commits, onClose }) {
   );
 }
 
-function BankrollChart({ points, initial }) {
+function BankrollChart({ points, range, initial }) {
+  if (points === null) {
+    return (
+      <div style={{ padding: "48px 0", textAlign: "center", color: C.muted, fontSize: 14 }}>
+        Loading…
+      </div>
+    );
+  }
   if (!points || points.length < 2) {
     return (
       <div style={{ padding: "48px 0", textAlign: "center", color: C.muted, fontSize: 14 }}>
-        No settled trades yet — chart will appear here once trades resolve.
+        Portfolio value will appear here as snapshots are recorded (every few minutes).
       </div>
     );
   }
@@ -797,7 +835,9 @@ function BankrollChart({ points, initial }) {
   const innerH = H - PT - PB;
   const n = points.length;
 
-  const values = points.map((p) => p.bankroll);
+  // Equity snapshots use `equity`; fall back to legacy `bankroll` just in case.
+  const valueOf = (p) => p.equity ?? p.bankroll ?? 0;
+  const values = points.map(valueOf);
   const rawMin = Math.min(...values);
   const rawMax = Math.max(...values);
   const pad = (rawMax - rawMin) * 0.12 || 20;
@@ -808,11 +848,11 @@ function BankrollChart({ points, initial }) {
   const toX = (i) => PL + (i / (n - 1)) * innerW;
   const toY = (v) => PT + (1 - (v - minVal) / valRange) * innerH;
 
-  const pts = points.map((p, i) => ({ x: toX(i), y: toY(p.bankroll) }));
+  const pts = points.map((p, i) => ({ x: toX(i), y: toY(valueOf(p)) }));
   const pathD = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
   const fillD = `${pathD} L${pts[n - 1].x.toFixed(1)},${(PT + innerH).toFixed(1)} L${pts[0].x.toFixed(1)},${(PT + innerH).toFixed(1)} Z`;
 
-  const current = points[n - 1].bankroll;
+  const current = valueOf(points[n - 1]);
   const lineColor = current >= initial ? C.green : C.red;
   const fillColor = current >= initial ? "#16a34a" : "#dc2626";
 
@@ -822,10 +862,12 @@ function BankrollChart({ points, initial }) {
     label: "$" + (minVal + valRange * frac).toFixed(0),
   }));
 
-  // Date range labels
-  const datePts = points.filter((p) => p.t);
-  const firstDate = datePts.length ? datePts[0].t.slice(0, 10) : "";
-  const lastDate = datePts.length ? datePts[datePts.length - 1].t.slice(0, 10) : "";
+  // X-axis ticks — up to ~5 evenly spaced, year-less labels.
+  const TICKS = Math.min(5, n);
+  const xTicks = Array.from({ length: TICKS }, (_, k) => {
+    const i = TICKS === 1 ? 0 : Math.round((k / (TICKS - 1)) * (n - 1));
+    return { x: toX(i), label: points[i].t ? fmtAxisTick(points[i].t, range) : "" };
+  });
   const currentY = toY(current);
 
   return (
@@ -871,9 +913,13 @@ function BankrollChart({ points, initial }) {
         {usd(current)}
       </text>
 
-      {/* Date labels */}
-      {firstDate && <text x={PL} y={H - 6} fill={C.subtle} fontSize="10" fontFamily={font}>{firstDate}</text>}
-      {lastDate && <text x={W - PR} y={H - 6} fill={C.subtle} fontSize="10" textAnchor="end" fontFamily={font}>{lastDate}</text>}
+      {/* Date labels (year-less) */}
+      {xTicks.map((tick, i) => (
+        <text key={i} x={tick.x.toFixed(1)} y={H - 6} fill={C.subtle} fontSize="10" fontFamily={font}
+          textAnchor={i === 0 ? "start" : i === xTicks.length - 1 ? "end" : "middle"}>
+          {tick.label}
+        </text>
+      ))}
     </svg>
   );
 }
