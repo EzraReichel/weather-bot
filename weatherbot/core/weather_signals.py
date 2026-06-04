@@ -484,9 +484,18 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
             )
             return None
 
-    # Edge direction
-    edge = model_yes_prob - market_yes_prob
-    direction = "yes" if edge >= 0 else "no"
+    # Direction from the model vs the market mid (mid used ONLY for direction).
+    edge_vs_mid = model_yes_prob - market_yes_prob
+    direction = "yes" if edge_vs_mid >= 0 else "no"
+
+    # Execution-aware edge: score against the price we'd actually PAY, not the
+    # mid. Buying YES costs the yes ask (yes_price); buying NO costs the no ask
+    # (no_price). Crediting ourselves the mid overstates edge by ~half the
+    # spread and waved through marginal trades (all NO-side in the bt archive).
+    if direction == "yes":
+        edge = model_yes_prob - market.yes_price
+    else:
+        edge = (1.0 - model_yes_prob) - market.no_price
 
     # Entry price filters — YES and NO use different floors.
     # YES bets under 30¢ have a 7% empirical win rate regardless of model edge;
@@ -603,9 +612,11 @@ async def _generate_rain_signal(market: WeatherMarket, live_bankroll: Optional[f
     model_yes_prob = max(0.05, min(0.95, rain_prob))
     market_yes_prob = market.yes_price
 
-    edge = model_yes_prob - market_yes_prob
-    direction = "yes" if edge >= 0 else "no"
+    direction = "yes" if (model_yes_prob - market_yes_prob) >= 0 else "no"
     entry_price = market.yes_price if direction == "yes" else market.no_price
+    # Execution-aware edge: score against the price actually paid (entry).
+    edge = (model_yes_prob - entry_price) if direction == "yes" \
+        else ((1.0 - model_yes_prob) - entry_price)
 
     # Rain NO bets at very low entry prices (YES priced >90¢) are strong opportunities
     # — use a tighter floor of 0.05 instead of the global WEATHER_MIN_ENTRY_PRICE.

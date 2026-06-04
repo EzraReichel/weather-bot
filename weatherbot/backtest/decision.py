@@ -238,9 +238,14 @@ def decide(day: WeatherDay, params: StrategyParams, bankroll: Optional[float] = 
             return None
 
     # ── Edge, entry filters, Kelly ────────────────────────────────────────────
-    edge = model_yes_prob - market_yes_prob
-    direction = "yes" if edge >= 0 else "no"
+    # Direction from the model vs the market mid (mid used ONLY for direction).
+    edge_vs_mid = model_yes_prob - market_yes_prob
+    direction = "yes" if edge_vs_mid >= 0 else "no"
     entry_price = market.yes_price if direction == "yes" else market.no_price
+    # Execution-aware edge: score against the price we'd actually PAY (entry),
+    # not the mid — mirrors weather_signals.py so live and backtest stay in sync.
+    edge = (model_yes_prob - entry_price) if direction == "yes" \
+        else ((1.0 - model_yes_prob) - entry_price)
 
     nws_prob = source_probs_map.get("nws", 0.0)
     cold_margin = (market.threshold_f - ensemble_mean) if market.direction == "below" else 0.0
@@ -317,9 +322,11 @@ def _decide_rain(day: WeatherDay, params: StrategyParams, bankroll: float) -> Op
         return None
     model_yes_prob = max(params.prob_floor, min(params.prob_ceiling, rain_prob))
     market_yes_prob = market.yes_price
-    edge = model_yes_prob - market_yes_prob
-    direction = "yes" if edge >= 0 else "no"
+    direction = "yes" if (model_yes_prob - market_yes_prob) >= 0 else "no"
     entry_price = market.yes_price if direction == "yes" else market.no_price
+    # Execution-aware edge: score against the price actually paid (entry).
+    edge = (model_yes_prob - entry_price) if direction == "yes" \
+        else ((1.0 - model_yes_prob) - entry_price)
     if entry_price > params.entry_max_price or entry_price < params.rain_entry_floor:
         edge = 0.0
     if model_yes_prob == params.prob_floor:
