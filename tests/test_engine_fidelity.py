@@ -48,6 +48,17 @@ def run() -> bool:
         params = StrategyParams.live_default()
         data = load_archive(db)  # whole archive
 
+        # The earliest ~4000 signals this window covers were all captured BEFORE
+        # per-city grid_bias was populated (every value was 0.0). The calibration
+        # biases added to cities.json (2026-06-16) are cross-validated separately
+        # in scripts/calibrate_archive.py; replaying them here would compare
+        # new-model output against old-model recordings. Pin grid_bias to its
+        # capture-time value (0) so this guardrail keeps testing decision-CODE
+        # fidelity, not the bias config layer.
+        from weatherbot.data.weather import CITY_CONFIG
+        for _cfg in CITY_CONFIG.values():
+            _cfg["grid_bias"] = {"high": 0.0, "low": 0.0}
+
         sig_rows = db.execute(text(
             "SELECT ticker, model_probability, market_probability, edge, bet_side, "
             "agreement, filter_reason, metric, captured_at FROM bt_signal_snapshots "
