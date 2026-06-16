@@ -65,3 +65,6 @@ key.txt
 cache/
 backtest_results/
 Screenshot *.png
+
+# Generated calibration study output
+calibration_archive.json
