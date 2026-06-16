@@ -46,6 +46,22 @@ PROB_CEILING_SIZING = 0.85   # substitute when model_prob == PROB_CEILING
 logger = logging.getLogger("weatherbot")
 
 
+def _regime_block_reason(direction: str, market_direction: str, entry_price: float) -> Optional[str]:
+    """
+    Decision-A regime gates, applied uniformly to every signal path.
+
+    Returns a human-readable reason string if the signal should be suppressed
+    (caller zeroes the edge so it can't pass threshold), or None to allow it.
+    Both gates are config-driven so they can be relaxed when the cold-snap
+    regime returns or the model is recalibrated. See config.py for the audit.
+    """
+    if settings.BLOCK_NO_ABOVE_SIGNALS and direction == "no" and market_direction == "above":
+        return "no/above blocked (no demonstrated edge outside cold-snap regime)"
+    if entry_price < settings.REGIME_MIN_ENTRY_PRICE:
+        return f"entry {entry_price:.0%} < regime floor {settings.REGIME_MIN_ENTRY_PRICE:.0%}"
+    return None
+
+
 @dataclass
 class WeatherTradingSignal:
     """A trading signal for a Kalshi weather temperature market."""
@@ -543,7 +559,8 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     )
     suggested_size = min(suggested_size, settings.WEATHER_MAX_TRADE_SIZE)
 
-    entry_price_filtered = entry_too_high or entry_too_low
+    regime_reason = _regime_block_reason(direction, market.market_direction, entry_price)
+    entry_price_filtered = entry_too_high or entry_too_low or bool(regime_reason)
     if entry_price_filtered:
         edge = 0.0
 
@@ -558,6 +575,8 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     if entry_too_low:
         min_shown = yes_min_entry if direction == "yes" else settings.WEATHER_MIN_ENTRY_PRICE
         filter_notes.append(f"entry {entry_price:.0%} < min {min_shown:.0%} ({'YES floor' if direction == 'yes' else 'NO floor'})")
+    if regime_reason:
+        filter_notes.append(regime_reason)
     if agreement == "LOW":
         filter_notes.append(f"models disagree ({req_edge:.0%} edge required)")
     filter_note = f" [{', '.join(filter_notes)}]" if filter_notes else ""
@@ -621,7 +640,8 @@ async def _generate_rain_signal(market: WeatherMarket, live_bankroll: Optional[f
     # Rain NO bets at very low entry prices (YES priced >90¢) are strong opportunities
     # — use a tighter floor of 0.05 instead of the global WEATHER_MIN_ENTRY_PRICE.
     rain_min_entry = RAIN_ENTRY_FLOOR
-    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < rain_min_entry:
+    regime_reason = _regime_block_reason(direction, market.market_direction, entry_price)
+    if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < rain_min_entry or regime_reason:
         edge = 0.0
 
     if model_yes_prob == PROB_FLOOR:
@@ -826,14 +846,22 @@ def _dedup_correlated(signals: List[WeatherTradingSignal]) -> List[WeatherTradin
 
 def _available_bankroll(live_bankroll: float) -> float:
     """
-    Return live_bankroll minus capital locked in open live trades.
+    Return capital free to deploy, given the Kelly bankroll basis.
 
-    Only live (is_paper=False) trades are subtracted — paper trades don't consume
-    real capital. Kalshi's balance field is available cash, so filled live trades
-    are already reflected in live_bankroll; subtracting here is conservative but
-    catches resting (unfilled) orders whose cost isn't yet deducted by Kalshi.
+    On CASH basis (KELLY_USE_EQUITY=false, the live default), live_bankroll IS
+    the Kalshi cash balance, which already excludes money in filled positions AND
+    cash reserved for resting limit orders. Subtracting open-trade cost again
+    double-counts it: once enough capital is deployed, `available` floors at 0,
+    the scaling ratio collapses to ~0, and every new Kelly size rounds down to
+    the 1-contract minimum. So on cash basis we return live_bankroll unchanged —
+    the balance is already authoritative and shrinks naturally as fills settle.
+
+    On EQUITY basis, live_bankroll includes the current value of open positions,
+    so we DO subtract capital locked in open live trades to recover free cash.
     Falls back to live_bankroll unchanged if the DB is unreachable.
     """
+    if not settings.KELLY_USE_EQUITY:
+        return live_bankroll
     try:
         from weatherbot.models.trade import SessionLocal as TradeSessionLocal, Trade as TradeModel
         db = TradeSessionLocal()

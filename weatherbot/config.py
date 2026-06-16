@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     WEATHER_MAX_TRADE_SIZE: float = 100.0
     CITY_OVERRIDE: str = ""  # e.g. "nyc" in .env to scan only one city locally
 
+    # ── Regime gates (decision A — summer bleed control) ──────────────────────
+    # Audited on the live ledger (144 resolved, queried 2026-06-16): these two
+    # gates turn −$366 as-traded into +$103, and June −$381 → −$13. They cut the
+    # two buckets with no demonstrated edge outside the spring cold-snap regime.
+    #   • no/above: −$352 over 75 trades (23% win) — the dominant summer loser.
+    #   • sub-20¢ entries: 7% win, −$454 — cheap longshots that only paid in the
+    #     spring paper run. Layered ON TOP of existing floors, so it only tightens
+    #     the NO floor (0.10→0.20) and the cold-day YES floor; the 0.30 YES floor
+    #     is unaffected. Flip these off / lower the floor when the cold-snap
+    #     regime returns or once the model is recalibrated.
+    BLOCK_NO_ABOVE_SIGNALS: bool = True
+    REGIME_MIN_ENTRY_PRICE: float = 0.20
+
     # Liquidity filters
     MIN_ASK_SIZE: int = 25
     MIN_VOLUME_24H: int = 200
