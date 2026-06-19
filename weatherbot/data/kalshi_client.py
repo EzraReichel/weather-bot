@@ -143,37 +143,76 @@ class KalshiClient:
         yes_price: Optional[int] = None, no_price: Optional[int] = None,
     ) -> dict:
         """
-        Place a limit order. side: 'yes' or 'no'. Prices in cents (e.g. 65 = $0.65).
+        Place a resting limit order via Kalshi's V2 endpoint
+        (POST /portfolio/events/orders). side: 'yes' or 'no'; prices in cents on
+        the side being bought (e.g. 65 = $0.65).
 
-        Kalshi prices the limit on the side being bought: a YES buy uses yes_price,
-        a NO buy uses no_price. Passing yes_price for a NO order makes Kalshi imply
-        a NO limit of (100 - yes_price), which sits a full spread below the real NO
-        ask and never crosses — so always send the price for the side you're buying.
+        The signature is unchanged from the legacy client so trading.py needs no
+        edits — we translate to the V2 schema here. The differences that matter:
 
-        For convenience, if only yes_price is given on a NO order we convert it to
-        the equivalent no_price (100 - yes_price).
-        Returns the full API response dict (contains 'order' key with order details).
+          • V2 has NO yes/no field; everything is quoted from the YES side:
+            buy YES = side 'bid', buy NO = side 'ask' (economically sell YES).
+          • `price` is ALWAYS the YES price, in DOLLARS. A NO buy at `no_price`
+            cents therefore sends a YES price of (100 - no_price)/100.
+          • count/price are fixed-point strings; time_in_force and
+            self_trade_prevention_type are required.
+
+        The legacy POST /portfolio/orders (side yes/no, cents) was retired by
+        Kalshi and now returns HTTP 410 — do not resurrect it.
+
+        Returns a dict normalized back to the legacy response shape (order id +,
+        on an immediate fill, a per-side fill price in cents) so existing callers
+        keep working.
         """
-        body = {
-            "ticker": ticker,
-            "action": "buy",
-            "side": side,
-            "count": count,
-            "type": "limit",
-        }
+        # Resolve a single YES-perspective limit price in whole cents.
         if side == "no":
             if no_price is None:
                 if yes_price is None:
                     raise ValueError("NO order requires no_price (or yes_price to convert)")
                 no_price = 100 - yes_price
-            body["no_price"] = no_price
+            yes_limit_cents = 100 - no_price   # YES price = 1 − NO price
+            order_side = "ask"                 # buy NO == sell YES
         else:
             if yes_price is None:
                 if no_price is None:
                     raise ValueError("YES order requires yes_price (or no_price to convert)")
                 yes_price = 100 - no_price
-            body["yes_price"] = yes_price
-        return await self._post("/portfolio/orders", body)
+            yes_limit_cents = yes_price
+            order_side = "bid"                 # buy YES
+
+        body = {
+            "ticker": ticker,
+            "side": order_side,
+            "count": str(int(count)),
+            "price": f"{yes_limit_cents / 100:.4f}",   # YES price in dollars
+            "time_in_force": "good_till_canceled",      # rest until filled/cancelled, as before
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+        resp = await self._post("/portfolio/events/orders", body)
+        return self._normalize_order_response(resp, side)
+
+    @staticmethod
+    def _normalize_order_response(resp: dict, side: str) -> dict:
+        """Map a V2 create-order response back to the legacy shape trading.py reads.
+
+        Legacy callers expect an order id under `id`/`order_id` and, on an
+        immediate fill, a per-side fill price in CENTS (`yes_price` for a YES buy,
+        `no_price` for a NO buy). V2 returns a flat body with `order_id` and —
+        only when it filled on placement — `average_fill_price` (a YES price in
+        dollars). When unfilled we omit the price so the caller falls back to the
+        limit (entry) price; settlement later reconciles from actual fills.
+        """
+        order_id = resp.get("order_id") or resp.get("id")
+        out = {"id": order_id, "order_id": order_id, "raw": resp}
+
+        avg = resp.get("average_fill_price")
+        if avg is not None:
+            yes_fill_cents = round(float(avg) * 100)
+            if side == "no":
+                out["no_price"] = 100 - yes_fill_cents   # back to NO cents
+            else:
+                out["yes_price"] = yes_fill_cents
+        return out
 
     async def cancel_order(self, order_id: str) -> dict:
         """Cancel an open order by ID."""
