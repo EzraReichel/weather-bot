@@ -1,7 +1,7 @@
 """Discord webhook notifications for weather arb signals."""
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 import requests
@@ -25,6 +25,16 @@ _TITLE_MAX       = 256
 _DESC_MAX        = 4096
 _MAX_FIELDS      = 25
 _ZERO_WIDTH      = "​"   # Discord rejects empty field name/value strings
+
+# Failure-alert dedup. A persistently failing order (e.g. a repeating Kalshi API
+# error) is re-attempted on every scan (~5 min), and each failure used to fire a
+# fresh 🚨 — which is how a single broken order flooded Discord overnight. We
+# collapse repeats of the same failure for the same ticker within this window.
+# The *success* path is deduped separately in the scheduler (_alerted_tickers);
+# failures can't be deduped there because log_live_trade returns None for both a
+# failure and a normal skip, so the suppression has to live here.
+_FAILED_ALERT_DEDUP_HOURS = 6
+_failed_alert_sent: dict = {}   # (ticker, reason_category) -> datetime last sent
 
 
 def _truncate(text, limit: int) -> str:
@@ -533,8 +543,28 @@ def send_startup_message(simulation_mode: bool, bankroll: float) -> bool:
 
 
 def send_live_order_failed_alert(ticker: str, reason: str) -> bool:
-    """Send a Discord alert when a live order fails to place (e.g. insufficient funds)."""
+    """Send a Discord alert when a live order fails to place (e.g. insufficient funds).
+
+    Deduped per (ticker, reason-category) within _FAILED_ALERT_DEDUP_HOURS so a
+    persistently failing order — re-attempted every scan — fires once per window
+    instead of flooding the channel. We key on the reason text *before* the first
+    ':' so the varying dollar amounts in 'Insufficient funds: $4.32 available …'
+    collapse to one alert, while a genuinely different failure for the same ticker
+    still gets through.
+    """
     if not settings.DISCORD_WEBHOOK_URL:
+        return False
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=_FAILED_ALERT_DEDUP_HOURS)
+    # Prune stale entries so the dict can't grow unbounded across restarts-free runs.
+    for stale in [k for k, v in _failed_alert_sent.items() if v <= cutoff]:
+        del _failed_alert_sent[stale]
+
+    key = (ticker, reason.split(":", 1)[0].strip())
+    last = _failed_alert_sent.get(key)
+    if last is not None and last > cutoff:
+        logger.debug(f"Suppressing duplicate live-order-failure alert: {key[0]} — {key[1]}")
         return False
 
     embed = {
@@ -542,11 +572,12 @@ def send_live_order_failed_alert(ticker: str, reason: str) -> bool:
         "description": reason,
         "color": COLOR_RED,
         "footer": {"text": "Kalshi Weather Arb Bot · Live Trading Error"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now.isoformat(),
     }
 
     success = _post_embed(embed)
     if success:
+        _failed_alert_sent[key] = now
         logger.info(f"Discord live order failure alert sent: {ticker}")
     return success
 
