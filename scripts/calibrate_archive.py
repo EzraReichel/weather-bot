@@ -30,10 +30,11 @@ load_dotenv(dotenv_path=str(Path(__file__).resolve().parent.parent / ".env"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from weatherbot.backtest.calibration import (
-    load_events, estimate_bias, lodo_cv_predictions, brier, reliability_curve,
+    load_events, estimate_bias, estimate_bias_seasonal, lodo_cv_predictions,
+    brier, reliability_curve,
 )
 from weatherbot.core.probability import SOURCE_WEIGHTS
-from weatherbot.core.strategy import StrategyParams
+from weatherbot.core.strategy import StrategyParams, season_for
 from weatherbot.models.weather_db import SessionLocal
 
 
@@ -131,6 +132,40 @@ def main():
     print("\n  ── Reliability (best config, + bias) ──")
     print(_fmt_rel(reliability_curve(best_preds)))
 
+    # ── Stage 4: season-aware fit (per-season bias + per-season knob sweep) ────
+    # The mechanism is general over DJF/MAM/JJA/SON; with a single-season archive
+    # only that season's bucket populates and everything else falls back. The
+    # apply step (scripts/apply_seasonal_calibration.py) consumes these blocks.
+    seasonal_bias = estimate_bias_seasonal(events, base.source_weights or SOURCE_WEIGHTS, args.min_samples)
+    seasons_present = sorted({season_for(e.target_date) for e in events})
+    print("\n  ── Stage 4: season-aware calibration ──")
+    print(f"  seasons present   : {', '.join(seasons_present)}")
+    print(f"  seasonal biases   : {len(seasonal_bias)} (season,city,metric) buckets ≥ {args.min_samples} days")
+    for (sea, city, metric), b in sorted(seasonal_bias.items(), key=lambda kv: -abs(kv[1]))[:12]:
+        print(f"      {sea}  {city:16s} {metric:4s}  {b:+5.1f}F")
+
+    best_by_season: dict = {}
+    for sea in seasons_present:
+        sea_events = [e for e in events if season_for(e.target_date) == sea]
+        if len({e.target_date for e in sea_events}) < 2:
+            print(f"  {sea}: <2 distinct days — skipping knob sweep (insufficient for LODO).")
+            continue
+        sea_results = []
+        for sh in std_high_grid:
+            for sl in std_low_grid:
+                for ef in ef_grid:
+                    p = base.with_(std_floor_high=sh, std_floor_low=sl,
+                                   ensemble_fraction_weight=ef, gaussian_cdf_weight=round(1 - ef, 3))
+                    preds = lodo_cv_predictions(sea_events, p, use_bias=True,
+                                                min_samples=args.min_samples, seasonal=True)
+                    sea_results.append({"std_high": sh, "std_low": sl, "ef_weight": ef,
+                                        "cdf_weight": round(1 - ef, 3), "cv_brier": round(brier(preds), 4)})
+        sea_results.sort(key=lambda r: r["cv_brier"])
+        best_by_season[sea] = sea_results[0]
+        print(f"  {sea} best knobs   : std_hi={sea_results[0]['std_high']} "
+              f"std_lo={sea_results[0]['std_low']} ef={sea_results[0]['ef_weight']} "
+              f"CV-Brier={sea_results[0]['cv_brier']}")
+
     out = {
         "window": {"start": str(days[0]), "end": str(days[-1]), "days": len(days)},
         "n_events": len(events),
@@ -141,6 +176,9 @@ def main():
         "sweep_top": results[:8],
         "best": best,
         "best_reliability": reliability_curve(best_preds),
+        "seasons_present": seasons_present,
+        "biases_seasonal": {f"{s}:{c}:{m}": round(b, 2) for (s, c, m), b in seasonal_bias.items()},
+        "best_by_season": best_by_season,
     }
     Path(args.out).write_text(json.dumps(out, indent=2))
     print(f"\n  full results → {args.out}")

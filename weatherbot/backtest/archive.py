@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import text
 
 from weatherbot.data.multi_source_weather import SourceForecast
-from weatherbot.data.weather import CITY_CONFIG, get_climatology_normal
+from weatherbot.data.weather import CITY_CONFIG, get_climatology_normal, get_grid_bias
 from weatherbot.data.weather_markets import WeatherMarket
 from weatherbot.backtest.world import WeatherDay
 
@@ -100,8 +100,7 @@ class BacktestData:
         tdate_str = meta.target_date.isoformat()
         wp = self.weather_at(meta.city_key, tdate_str, as_of)
 
-        ccfg = CITY_CONFIG.get(meta.city_key, {})
-        grid_bias = ccfg.get("grid_bias", {}).get(meta.metric, 0.0)
+        grid_bias = get_grid_bias(meta.city_key, meta.metric, meta.target_date)
         market = WeatherMarket(
             slug=ticker, market_id=ticker, platform="kalshi", title=ticker,
             city_key=meta.city_key, city_name=meta.city_name,

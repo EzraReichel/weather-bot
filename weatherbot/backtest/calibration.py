@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 from sqlalchemy import text
 
 from weatherbot.core.probability import compute_multi_source_probability, SOURCE_WEIGHTS
-from weatherbot.core.strategy import StrategyParams
+from weatherbot.core.strategy import StrategyParams, season_for
 from weatherbot.data.multi_source_weather import SourceForecast
 
 logger = logging.getLogger("weatherbot")
@@ -183,6 +183,30 @@ def estimate_bias(
     return {k: statistics.mean(v) for k, v in resid.items() if len(v) >= min_samples}
 
 
+def estimate_bias_seasonal(
+    events: List[CalEvent],
+    weights: Dict[str, float],
+    min_samples: int = 5,
+) -> Dict[Tuple[str, str, str], float]:
+    """
+    Per-(season, city, metric) additive bias = mean(observed − forecast_center).
+
+    Same statistic as ``estimate_bias`` but bucketed by meteorological season, so
+    a city can carry e.g. a different summer vs winter grid correction. Returns
+    only buckets with >= ``min_samples`` days; callers treat a missing bucket as
+    "fall back to the cross-season bias (or 0)". With a single-season archive this
+    yields only that season's keys — exactly the within-season recalibration.
+    """
+    resid: Dict[Tuple[str, str, str], List[float]] = {}
+    for e in events:
+        center = _weighted_center(e.forecast.members, weights)
+        if center is None:
+            continue
+        key = (season_for(e.target_date), e.city_key, e.metric)
+        resid.setdefault(key, []).append(e.observed_f - center)
+    return {k: statistics.mean(v) for k, v in resid.items() if len(v) >= min_samples}
+
+
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 def _model_prob(e: CalEvent, params: StrategyParams, bias: float) -> Optional[float]:
@@ -229,11 +253,19 @@ def lodo_cv_predictions(
     params: StrategyParams,
     use_bias: bool,
     min_samples: int = 5,
+    seasonal: bool = False,
 ) -> List[Tuple[float, int]]:
     """
     Leave-one-day-out predictions. For each target_date, the bias (if enabled)
     is estimated from all OTHER days, then applied to score that day's events —
     so no event is ever scored with a bias that saw its own outcome.
+
+    When ``seasonal`` is set, bias is bucketed by (season, city, metric); the
+    held-out day's events look up their own season's bias and fall back to the
+    cross-season bias when that bucket is too thin. ``params.for_season`` is also
+    applied per event so the std-floor/blend knobs match the season being scored.
+    On a single-season archive seasonal results are numerically identical to the
+    flat run (every day shares one season) — a useful plumbing sanity check.
     """
     weights = params.source_weights or SOURCE_WEIGHTS
     days = sorted({e.target_date for e in events})
@@ -241,10 +273,23 @@ def lodo_cv_predictions(
     for held in days:
         train = [e for e in events if e.target_date != held]
         test = [e for e in events if e.target_date == held]
-        bias_map = estimate_bias(train, weights, min_samples) if use_bias else {}
+        if not use_bias:
+            flat_map: Dict[Tuple[str, str], float] = {}
+            seasonal_map: Dict[Tuple[str, str, str], float] = {}
+        else:
+            flat_map = estimate_bias(train, weights, min_samples)
+            seasonal_map = estimate_bias_seasonal(train, weights, min_samples) if seasonal else {}
         for e in test:
-            bias = bias_map.get((e.city_key, e.metric), 0.0) if use_bias else 0.0
-            p = _model_prob(e, params, bias)
+            if not use_bias:
+                bias = 0.0
+            elif seasonal:
+                bias = seasonal_map.get((season_for(e.target_date), e.city_key, e.metric))
+                if bias is None:
+                    bias = flat_map.get((e.city_key, e.metric), 0.0)
+            else:
+                bias = flat_map.get((e.city_key, e.metric), 0.0)
+            ev_params = params.for_season(e.target_date) if seasonal else params
+            p = _model_prob(e, ev_params, bias)
             if p is not None:
                 preds.append((p, e.outcome))
     return preds

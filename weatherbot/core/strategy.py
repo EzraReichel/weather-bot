@@ -16,10 +16,69 @@ builds variants with ``dataclasses.replace(params, kelly_fraction=0.10, ...)``.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field, replace
+from datetime import date
+from functools import lru_cache
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 from weatherbot.config import settings
+
+
+# Meteorological 3-month season buckets. Used to key season-aware calibration
+# (per-city grid bias, std floors, blend weights). Three-month buckets are coarse
+# enough that each accumulates a usable sample before it's trusted — month buckets
+# are too sparse against the min_samples floor the calibration uses.
+_SEASON_BY_MONTH: Dict[int, str] = {
+    12: "DJF", 1: "DJF", 2: "DJF",
+    3: "MAM", 4: "MAM", 5: "MAM",
+    6: "JJA", 7: "JJA", 8: "JJA",
+    9: "SON", 10: "SON", 11: "SON",
+}
+
+
+def season_for(d: date) -> str:
+    """Meteorological season bucket for a date: 'DJF' | 'MAM' | 'JJA' | 'SON'."""
+    return _SEASON_BY_MONTH[d.month]
+
+
+# Optional file of per-season std-floor/blend overrides, written by
+# scripts/apply_seasonal_calibration.py. Absent until calibration is applied, so
+# live_default() gets {} and stays byte-for-byte identical to today.
+_SEASONAL_OVERRIDES_PATH = Path(__file__).resolve().parent.parent / "seasonal_overrides.json"
+
+
+@lru_cache(maxsize=1)
+def _load_seasonal_overrides() -> Tuple[Tuple[str, Tuple[Tuple[str, float], ...]], ...]:
+    """Load and freeze the seasonal-override config (cached). Returns a hashable
+    tuple form so the cache is safe; callers rebuild a fresh dict from it."""
+    try:
+        raw = json.loads(_SEASONAL_OVERRIDES_PATH.read_text())
+    except (FileNotFoundError, ValueError):
+        return ()
+    if not isinstance(raw, dict):
+        return ()
+    frozen = []
+    for season, ov in raw.items():
+        if isinstance(ov, dict):
+            frozen.append((season, tuple((k, float(v)) for k, v in ov.items()
+                                         if k in _SEASONAL_OVERRIDE_FIELDS)))
+    return tuple(frozen)
+
+
+def load_seasonal_overrides() -> Dict[str, Dict[str, float]]:
+    """Fresh dict of {season: {field: value}} from the override config (or {})."""
+    return {season: dict(ov) for season, ov in _load_seasonal_overrides()}
+
+
+# Fields that may be overridden per-season (see StrategyParams.seasonal_overrides).
+# Deliberately narrow: only the model-math knobs that calibration fits seasonally.
+# Source weights, filters, and sizing are intentionally NOT season-aware.
+_SEASONAL_OVERRIDE_FIELDS = frozenset({
+    "std_floor_high", "std_floor_low",
+    "ensemble_fraction_weight", "gaussian_cdf_weight",
+})
 
 
 # Lead-time uncertainty inflation: (lo_hours, hi_hours, factor). Mirrors
@@ -109,6 +168,14 @@ class StrategyParams:
     min_ask_size: int = 25
     min_volume_24h: int = 200
 
+    # ── Season-aware calibration ──────────────────────────────────────────────
+    # Optional per-season overrides of the model-math knobs in
+    # _SEASONAL_OVERRIDE_FIELDS, keyed by season bucket ("DJF"/"MAM"/"JJA"/"SON").
+    # Empty by default → for_season() is identity → behavior is unchanged. Only
+    # seasons with enough calibration data are populated; absent seasons fall back
+    # to the top-level (global) values. See for_season().
+    seasonal_overrides: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
     # ── Identity ──────────────────────────────────────────────────────────────
     name: str = "live_default"
 
@@ -136,12 +203,34 @@ class StrategyParams:
             conviction_threshold=settings.TRADING_HOURS_CONVICTION_THRESHOLD,
             min_ask_size=settings.MIN_ASK_SIZE,
             min_volume_24h=settings.MIN_VOLUME_24H,
+            seasonal_overrides=load_seasonal_overrides(),
             name="live_default",
         )
 
     def with_(self, **overrides) -> "StrategyParams":
         """Return a copy with the given fields replaced (convenience over replace())."""
         return replace(self, **overrides)
+
+    def for_season(self, target_date: date) -> "StrategyParams":
+        """
+        Resolve season-aware overrides for ``target_date``.
+
+        Returns ``self`` unchanged when there are no overrides for the date's
+        season (the common case, and the default) — so with an empty
+        ``seasonal_overrides`` this is a true identity and live behavior is
+        byte-for-byte unchanged. When a season bucket is present, returns a copy
+        with only the whitelisted model-math fields replaced; all other fields
+        (filters, sizing, source weights) are untouched.
+        """
+        if not self.seasonal_overrides:
+            return self
+        ov = self.seasonal_overrides.get(season_for(target_date))
+        if not ov:
+            return self
+        applied = {k: v for k, v in ov.items() if k in _SEASONAL_OVERRIDE_FIELDS}
+        if not applied:
+            return self
+        return replace(self, **applied)
 
     def to_dict(self) -> dict:
         """JSON-safe dict (tuples become lists, non-finite floats clamped). Round-trips via from_dict."""

@@ -86,6 +86,10 @@ def decide(day: WeatherDay, params: StrategyParams, bankroll: Optional[float] = 
     if market.metric == "rain":
         return _decide_rain(day, params, bankroll)
 
+    # Resolve season-aware overrides (std floors / blend weights). Identity unless
+    # params.seasonal_overrides has a bucket for this date — mirrors the live path.
+    params = params.for_season(market.target_date)
+
     raw_sources = day.sources or {}
     multi_result: Optional[MultiSourceResult] = None
 

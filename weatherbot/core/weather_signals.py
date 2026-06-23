@@ -18,7 +18,7 @@ from weatherbot.core.probability import (
 # wanted to go even more extreme, but we clamp it.  Those trades win ~45% of the
 # time in practice despite the model claiming 95% confidence, so we use a less
 # extreme stand-in probability *only for Kelly sizing* to avoid over-sizing.
-from weatherbot.data.weather import fetch_ensemble_forecast, CITY_CONFIG, get_climatology_normal
+from weatherbot.data.weather import fetch_ensemble_forecast, CITY_CONFIG, get_climatology_normal, get_grid_bias
 
 MODEL_DIVERGENCE_THRESHOLD = 8.0   # °F — skip if GFS and ECMWF means differ by more than this
 OBS_WINDOW_HOURS           = 6     # hours before resolution to apply observation constraint
@@ -141,6 +141,13 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     if market.metric == "rain":
         return await _generate_rain_signal(market, bankroll)
 
+    # Season-resolved strategy params — single source of truth shared with the
+    # backtester. live_default() reproduces today's module constants exactly, and
+    # for_season() is identity unless seasonal_overrides are configured, so this
+    # is behavior-preserving until calibration writes in per-season values.
+    from weatherbot.core.strategy import StrategyParams
+    params = StrategyParams.live_default().for_season(market.target_date)
+
     # ── Try multi-source first ────────────────────────────────────────────────
     multi_result: Optional[MultiSourceResult] = None
 
@@ -202,8 +209,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
         # Bias is additive (positive = grid runs cold relative to station).
         # Set in cities.json grid_bias.{high|low}; defaults to 0.0.
         from weatherbot.data.multi_source_weather import SourceForecast
-        city_cfg = CITY_CONFIG.get(market.city_key, {})
-        grid_bias: float = city_cfg.get("grid_bias", {}).get(market.metric, 0.0)
+        grid_bias: float = get_grid_bias(market.city_key, market.metric, market.target_date)
 
         metric_sources: Dict[str, SourceForecast] = {}
         for name, src in raw_sources.items():
@@ -228,6 +234,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
             target_date=market.target_date,
             metric=market.metric,
             city_key=market.city_key,
+            params=params,
         )
     except Exception as e:
         logger.warning(f"Multi-source fetch failed for {market.market_id}, falling back to GFS: {e}")
@@ -247,6 +254,7 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
             direction=market.direction,
             target_date=market.target_date,
             metric=market.metric,
+            params=params,
         )
         if not prob_result:
             return None

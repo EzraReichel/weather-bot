@@ -45,7 +45,11 @@ SAMPLE = 4000
 def run() -> bool:
     db = SessionLocal()
     try:
-        params = StrategyParams.live_default()
+        # Clear any applied seasonal std-floor/blend overrides so this guardrail
+        # tests decision-CODE fidelity, not the calibration config layer (same
+        # reasoning as the grid_bias pin below). Without this, applying a seasonal
+        # fit would replay new knobs against old-knob recordings.
+        params = StrategyParams.live_default().with_(seasonal_overrides={})
         data = load_archive(db)  # whole archive
 
         # The earliest ~4000 signals this window covers were all captured BEFORE
@@ -58,6 +62,7 @@ def run() -> bool:
         from weatherbot.data.weather import CITY_CONFIG
         for _cfg in CITY_CONFIG.values():
             _cfg["grid_bias"] = {"high": 0.0, "low": 0.0}
+            _cfg["grid_bias_seasonal"] = {}   # neutralize the seasonal bias layer too
 
         sig_rows = db.execute(text(
             "SELECT ticker, model_probability, market_probability, edge, bet_side, "

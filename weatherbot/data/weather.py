@@ -80,6 +80,28 @@ def get_climatology_normal(city_key: str, target_date: "date", metric: str) -> O
     return float(high) if metric == "high" else float(low) if metric == "low" else None
 
 
+def get_grid_bias(city_key: str, metric: str, target_date: "date") -> float:
+    """Additive grid→station temperature bias (°F) for a city/metric/date.
+
+    Open-Meteo's grid cell differs systematically from the station thermometer
+    Kalshi resolves on; this correction is added to forecast members before the
+    probability model. Fallback chain:
+        seasonal bucket (grid_bias_seasonal[season][metric])
+        → flat grid_bias[metric]
+        → 0.0
+    The seasonal layer is populated only where calibration has enough data; until
+    then a city falls back to its single (cross-season) grid_bias, so behavior is
+    unchanged for cities without a seasonal block.
+    """
+    from weatherbot.core.strategy import season_for  # local import avoids any cycle
+
+    city = CITY_CONFIG.get(city_key, {})
+    seasonal = city.get("grid_bias_seasonal", {}).get(season_for(target_date))
+    if seasonal is not None and metric in seasonal:
+        return float(seasonal[metric])
+    return float(city.get("grid_bias", {}).get(metric, 0.0))
+
+
 @dataclass
 class EnsembleForecast:
     """Ensemble weather forecast with per-member data."""
