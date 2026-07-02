@@ -42,6 +42,65 @@ app = FastAPI(docs_url=None, redoc_url=None)
 
 FRONTEND_DIR = Path(__file__).parent / "dashboard"
 
+# ── Dashboard authentication ─────────────────────────────────────────────────
+# Every route except GET/HEAD /health requires the dashboard token, supplied as
+# an `Authorization: Bearer <token>` header, a one-time `?token=` query param
+# (which we then persist in an HttpOnly cookie), or that cookie on later requests.
+# The bot trades real money, so the admin panel must never be open under live
+# trading: if DASHBOARD_TOKEN is unset while LIVE_TRADING=true we FAIL CLOSED and
+# serve 503 on everything but /health. With LIVE_TRADING=false an unset token
+# leaves the panel open for local-dev convenience.
+import secrets as _secrets
+
+_DASH_COOKIE = "wb_dash_token"
+
+
+def _is_open_path(request: Request) -> bool:
+    """Only the health check is reachable without auth."""
+    return request.url.path == "/health" and request.method in ("GET", "HEAD")
+
+
+@app.middleware("http")
+async def dashboard_auth(request: Request, call_next):
+    if _is_open_path(request):
+        return await call_next(request)
+
+    token = settings.DASHBOARD_TOKEN
+    if not token:
+        # No token configured. Fail closed under live trading; open otherwise.
+        if settings.LIVE_TRADING:
+            return JSONResponse(
+                {"detail": "Dashboard locked: DASHBOARD_TOKEN is unset while "
+                           "LIVE_TRADING=true. Set DASHBOARD_TOKEN to unlock."},
+                status_code=503,
+            )
+        return await call_next(request)
+
+    # Token configured — accept it from the Bearer header, the ?token= param, or
+    # the cookie. Constant-time compare to avoid leaking it via timing.
+    provided = None
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        provided = auth[len("Bearer "):].strip()
+    query_token = request.query_params.get("token")
+    if provided is None and query_token is not None:
+        provided = query_token
+    if provided is None:
+        provided = request.cookies.get(_DASH_COOKIE)
+
+    if not provided or not _secrets.compare_digest(provided, token):
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+
+    response = await call_next(request)
+    # First entry via ?token= — persist it in an HttpOnly cookie so the browser
+    # carries it on subsequent asset/API requests without exposing it to JS.
+    if query_token is not None and _secrets.compare_digest(query_token, token):
+        response.set_cookie(
+            _DASH_COOKIE, token, httponly=True, samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+    return response
+
 
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
@@ -514,6 +573,19 @@ async def on_startup():
         logger.info("=" * 60)
         logger.info("PAPER TRADING MODE — no real trades will be placed")
         logger.info("=" * 60)
+
+    # Dashboard auth posture (see the dashboard_auth middleware).
+    if not settings.DASHBOARD_TOKEN:
+        if settings.LIVE_TRADING:
+            logger.warning("!" * 60)
+            logger.warning("SECURITY: DASHBOARD_TOKEN is UNSET while LIVE_TRADING=true.")
+            logger.warning("Dashboard is FAIL-CLOSED — every route except /health "
+                           "returns 503 until DASHBOARD_TOKEN is set.")
+            logger.warning("!" * 60)
+        else:
+            logger.info("DASHBOARD_TOKEN unset (LIVE_TRADING=false) — dashboard open for local dev")
+    else:
+        logger.info("Dashboard auth enabled (Bearer token / ?token= / cookie)")
     logger.info(f"Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}  |  "
                 f"Kelly: {settings.KELLY_FRACTION:.0%}  |  "
                 f"Fee rate: {settings.KALSHI_FEE_RATE:.0%}  |  "

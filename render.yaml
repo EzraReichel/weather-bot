@@ -22,6 +22,11 @@ services:
       - key: DISCORD_WEBHOOK_URL
         sync: false
 
+      # Dashboard auth token — REQUIRED under live trading (panel fails closed
+      # without it). Set a long random value in the Render dashboard.
+      - key: DASHBOARD_TOKEN
+        sync: false
+
       # Bot tuning — edit these to match your current .env
       - key: INITIAL_BANKROLL
         value: "1000.0"

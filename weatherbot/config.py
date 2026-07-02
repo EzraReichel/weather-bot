@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     DISCORD_BOT_TOKEN: Optional[str] = None    # Bot token for reading messages (optional)
     DISCORD_CHANNEL_ID: Optional[str] = None   # Channel ID to poll for commands
 
+    # Dashboard auth — Bearer token (or ?token= / cookie) required on every route
+    # except /health. When unset the dashboard is open ONLY if LIVE_TRADING=false
+    # (local dev); under live trading an unset token fails the panel closed (503).
+    DASHBOARD_TOKEN: Optional[str] = None
+
     # Bot settings
     INITIAL_BANKROLL: float = 1000.0
     KELLY_FRACTION: float = 0.15
