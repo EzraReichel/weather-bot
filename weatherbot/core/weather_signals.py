@@ -26,7 +26,6 @@ CLIMATOLOGY_DEVIATION_MAX  = 1.5   # °F — skip if ensemble mean is within thi
 COLD_DAY_MARGIN            = 4.0   # °F below threshold required for cold-day YES exception
 COLD_DAY_NWS_MIN           = 0.85  # NWS prob floor for cold-day YES exception
 YES_ENTRY_FLOOR            = 0.30  # minimum entry price for YES bets (empirical: <30¢ wins ~7%)
-RAIN_ENTRY_FLOOR           = 0.05  # minimum entry price for rain market bets
 
 # Trading hours — model runs fire at these ET hours; data older than MAX_AGE is stale
 MODEL_RUN_HOURS_ET       = [(3, 30), (9, 30), (15, 30), (21, 30)]
@@ -651,9 +650,14 @@ async def _generate_rain_signal(market: WeatherMarket, live_bankroll: Optional[f
     edge = (model_yes_prob - entry_price) if direction == "yes" \
         else ((1.0 - model_yes_prob) - entry_price)
 
-    # Rain NO bets at very low entry prices (YES priced >90¢) are strong opportunities
-    # — use a tighter floor of 0.05 instead of the global WEATHER_MIN_ENTRY_PRICE.
-    rain_min_entry = RAIN_ENTRY_FLOOR
+    # June-2026 regime audit: the old RAIN_ENTRY_FLOOR (0.05) carve-out was dead
+    # code. Every rain market is direction "above", so Decision-A's regime gates
+    # (BLOCK_NO_ABOVE_SIGNALS blocks the rain NO bets, REGIME_MIN_ENTRY_PRICE=0.20
+    # zeroes any sub-20¢ entry) already overrode a 5¢ floor. Rain now uses the
+    # standard entry floor and the same regime gates as every other signal —
+    # behavior-preserving. To restore a distinct rain strategy, exempt
+    # metric=="rain" inside _regime_block_reason (Decision A), not via a floor.
+    rain_min_entry = settings.WEATHER_MIN_ENTRY_PRICE
     regime_reason = _regime_block_reason(direction, market.market_direction, entry_price)
     if entry_price > settings.WEATHER_MAX_ENTRY_PRICE or entry_price < rain_min_entry or regime_reason:
         edge = 0.0
