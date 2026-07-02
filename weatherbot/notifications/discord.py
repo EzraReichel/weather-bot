@@ -148,7 +148,7 @@ def send_daily_summary(
     # both paper and live stats dicts (live stats carries no precomputed brier).
     resolved_trades = stats.get("resolved_trades", []) or []
     brier_scores = [
-        (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
+        (t.model_prob - t.yes_outcome) ** 2
         for t in resolved_trades
         if t.model_prob is not None
     ]
@@ -173,7 +173,7 @@ def send_daily_summary(
         resolved_lines = []
         for t in resolved_today[:12]:
             icon = "✅" if t.result == "win" else ("🚫" if t.result == "cancelled" else "❌")
-            kalshi_result = "YES" if (t.actual_temp or 0) >= 1.0 else "NO"
+            kalshi_result = "YES" if t.yes_outcome >= 1.0 else "NO"
             pnl_val = t.pnl if t.pnl is not None else 0.0
             resolved_lines.append(
                 f"{icon} `{t.ticker}` Kalshi={kalshi_result}  side={t.side.upper()}  ${pnl_val:+.2f}"
@@ -216,13 +216,13 @@ def send_trade_settled_alert(trade, bankroll: Optional[float] = None) -> bool:
         return False
 
     icon = "✅" if trade.result == "win" else "❌"
-    kalshi_result = "YES" if (trade.actual_temp or 0) >= 1.0 else "NO"
+    kalshi_result = "YES" if trade.yes_outcome >= 1.0 else "NO"
     pnl_sign = "+" if (trade.pnl or 0) >= 0 else ""
     is_live = not getattr(trade, "is_paper", True)
     color = COLOR_GREEN if trade.result == "win" else COLOR_RED
     mode_prefix = "💸 LIVE" if is_live else "📝 PAPER"
 
-    yes_outcome = 1.0 if (trade.actual_temp or 0) >= 1.0 else 0.0
+    yes_outcome = trade.yes_outcome
     brier_contrib = (trade.model_prob - yes_outcome) ** 2
 
     fields = [
@@ -386,7 +386,7 @@ def send_paper_report(bankroll: Optional[float] = None) -> bool:
         resolved_lines = []
         for t in resolved_trades[:8]:
             icon = "✅" if t.result == "win" else "❌"
-            kalshi_result = "YES" if (t.actual_temp or 0) >= 1.0 else "NO"
+            kalshi_result = "YES" if t.yes_outcome >= 1.0 else "NO"
             resolved_lines.append(
                 f"{icon} `{t.ticker}` Kalshi={kalshi_result}  side={t.side.upper()}  ${t.pnl:+.2f}"
             )

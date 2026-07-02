@@ -20,11 +20,15 @@ async def execute_signal(signal) -> Optional[Trade]:
     if not settings.LIVE_TRADING:
         return log_paper_trade(signal)
 
-    assert "demo" not in settings.KALSHI_API_BASE_URL, (
-        "LIVE_TRADING=true but KALSHI_API_BASE_URL points at the demo API — "
-        "set KALSHI_API_BASE_URL=https://api.kalshi.com/trade-api/v2 in .env"
-    )
-    assert settings.KALSHI_API_KEY_ID, "LIVE_TRADING=true but KALSHI_API_KEY_ID is not set"
+    # Explicit raises, not assert — assertions are stripped under `python -O`,
+    # which would silently disable these live-trading guardrails.
+    if "demo" in settings.KALSHI_API_BASE_URL:
+        raise RuntimeError(
+            "LIVE_TRADING=true but KALSHI_API_BASE_URL points at the demo API — "
+            "set KALSHI_API_BASE_URL=https://api.kalshi.com/trade-api/v2 in .env"
+        )
+    if not settings.KALSHI_API_KEY_ID:
+        raise RuntimeError("LIVE_TRADING=true but KALSHI_API_KEY_ID is not set")
 
     return await log_live_trade(signal)
 

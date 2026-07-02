@@ -97,10 +97,11 @@ async def _run_weather_scan():
             alert_cutoff = datetime.utcnow() - timedelta(hours=_ALERT_DEDUP_HOURS)
             if last_alerted is None or last_alerted <= alert_cutoff:
                 try:
+                    # Discord sends use sync `requests`; run off the event loop.
                     if trade.is_paper:
-                        send_paper_trade_alert(signal, trade)
+                        await asyncio.to_thread(send_paper_trade_alert, signal, trade)
                     else:
-                        send_live_trade_alert(signal, trade)
+                        await asyncio.to_thread(send_live_trade_alert, signal, trade)
                     _alerted_tickers[ticker] = datetime.utcnow()
                 except Exception as e:
                     logger.error(f"Failed to send Discord alert for {ticker}: {e}")
@@ -128,7 +129,7 @@ async def discord_command_poll_job():
     """Poll Discord channel every 60s for 'report' commands."""
     try:
         bankroll = await fetch_live_balance()
-        poll_discord_commands(bankroll=bankroll)
+        await asyncio.to_thread(poll_discord_commands, bankroll=bankroll)
     except Exception as e:
         logger.error(f"Discord command poll error: {e}", exc_info=True)
 
@@ -150,7 +151,12 @@ async def settlement_job():
         # Notify off the DB (resolved & not-yet-notified), not off `settled`, so
         # an alert is sent exactly once even across rollbacks/restarts.
         bankroll = await fetch_live_balance()
-        notify_pending_settlements(lambda t: send_trade_settled_alert(t, bankroll=bankroll))
+        # notify_pending_settlements does sync Discord sends (+ its own DB
+        # session) — run it off the event loop.
+        await asyncio.to_thread(
+            notify_pending_settlements,
+            lambda t: send_trade_settled_alert(t, bankroll=bankroll),
+        )
     except Exception as e:
         logger.error(f"Settlement error: {e}", exc_info=True)
 
@@ -219,9 +225,11 @@ async def daily_summary_job():
             ]
             daily_pnl = sum(t.pnl for t in resolved_today if t.pnl is not None)
 
-            # Daily Brier: mean squared error only for trades settled today
+            # Daily Brier: mean squared error only for trades settled today.
+            # yes_outcome reads yes_resolved, falling back to actual_temp for
+            # legacy rows.
             daily_brier_scores = [
-                (t.model_prob - (1.0 if (t.actual_temp or 0) >= 1.0 else 0.0)) ** 2
+                (t.model_prob - t.yes_outcome) ** 2
                 for t in resolved_today
                 if t.model_prob is not None
             ]
@@ -233,7 +241,8 @@ async def daily_summary_job():
             trade_db.close()
 
         bankroll = await fetch_live_balance()
-        send_daily_summary(
+        await asyncio.to_thread(
+            send_daily_summary,
             logged_today=logged_today,
             resolved_today=resolved_today,
             daily_pnl=daily_pnl,

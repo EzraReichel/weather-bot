@@ -219,13 +219,13 @@ async def settle_paper_trades() -> List[Trade]:
                                  settings.KALSHI_FEE_RATE)
             result = "win" if we_win else "loss"
 
-            pt.resolved    = True
-            pt.result      = result
-            pt.pnl         = round(pnl, 2)
-            pt.resolved_at = datetime.utcnow()
-            # Store Kalshi result as actual_temp proxy so reports still work
-            # (actual_temp field repurposed: positive = yes resolved, negative = no resolved)
-            pt.actual_temp = 1.0 if yes_wins else 0.0
+            pt.resolved     = True
+            pt.result       = result
+            pt.pnl          = round(pnl, 2)
+            pt.resolved_at  = datetime.utcnow()
+            # Record the binary outcome in yes_resolved (reports read it via
+            # Trade.yes_outcome). No longer overwrites actual_temp.
+            pt.yes_resolved = bool(yes_wins)
             settled.append(pt)
 
             # YES outcome for Brier scoring
@@ -321,9 +321,9 @@ def get_paper_stats(db=None):
         # actual_outcome = 1 if YES won, 0 if NO won
         brier_scores = []
         for t in resolved:
-            # actual_temp stores Kalshi result: 1.0=YES won, 0.0=NO won
-            yes_won = 1.0 if (t.actual_temp or 0) >= 1.0 else 0.0
-            brier_scores.append((t.model_prob - yes_won) ** 2)
+            # yes_outcome: 1.0 if YES resolved, else 0.0 (yes_resolved, with
+            # actual_temp fallback for legacy rows).
+            brier_scores.append((t.model_prob - t.yes_outcome) ** 2)
         brier = (sum(brier_scores) / len(brier_scores)) if brier_scores else None
 
         # City breakdown

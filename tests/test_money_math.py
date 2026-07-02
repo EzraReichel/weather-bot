@@ -22,6 +22,7 @@ from weatherbot.core.probability import (
     LOW_CONFIDENCE_EDGE_OVERRIDE,
     compute_probability,
     kalshi_trade_fee,
+    kalshi_trade_fee_ceil,
     kelly_size,
     min_profitable_edge,
     settlement_pnl,
@@ -165,12 +166,22 @@ def test_low_agreement_raises_bar_to_override():
 
 
 # ── Settlement P&L ───────────────────────────────────────────────────────────
+def test_kalshi_trade_fee_ceil():
+    # raw 0.07·10·0.40·0.60 = 0.168 → ceil to next cent = 0.17
+    assert kalshi_trade_fee_ceil(0.40, 10, 0.07) == pytest.approx(0.17)
+    # raw 0.0175 → 0.02
+    assert kalshi_trade_fee_ceil(0.50, 1, 0.07) == pytest.approx(0.02)
+    # always ≥ the un-ceiled fee
+    assert kalshi_trade_fee_ceil(0.37, 7, 0.07) >= kalshi_trade_fee(0.37, 7, 0.07)
+
+
 def test_settlement_pnl_win_and_loss():
-    # entry 0.40, 10 contracts, fee=0.07·10·0.40·0.60=0.168
+    # entry 0.40, 10 contracts. Kalshi ceils the fee to the next cent:
+    # raw 0.168 → 0.17.
     win = settlement_pnl(0.40, 10, True, 0.07)
     loss = settlement_pnl(0.40, 10, False, 0.07)
-    assert win == pytest.approx(0.60 * 10 - 0.168)     # 5.832
-    assert loss == pytest.approx(-0.40 * 10 - 0.168)   # -4.168
+    assert win == pytest.approx(0.60 * 10 - 0.17)     # 5.83
+    assert loss == pytest.approx(-0.40 * 10 - 0.17)   # -4.17
     assert round(win, 2) == 5.83
     assert round(loss, 2) == -4.17
     # the fee is always subtracted, win or lose

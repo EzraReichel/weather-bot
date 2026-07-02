@@ -11,6 +11,7 @@ Probability blending policy (Task 3 fix):
   - Final blend: 70% ensemble_fraction + 30% gaussian_cdf, clamped [0.05, 0.95].
 """
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, date
 from typing import Dict, List, Optional, TYPE_CHECKING
@@ -484,6 +485,15 @@ def kalshi_trade_fee(entry_price: float, n_contracts: int = 1, fee_coef: float =
     return fee_coef * n_contracts * entry_price * (1.0 - entry_price)
 
 
+def kalshi_trade_fee_ceil(entry_price: float, n_contracts: int = 1, fee_coef: float = 0.07) -> float:
+    """Kalshi rounds the trading fee UP to the next whole cent. Use this ceiled
+    value where the exact charge matters — the balance preflight and settled
+    P&L — so we never under-reserve cash or overstate realized P&L. (Kelly
+    sizing keeps the smooth kalshi_trade_fee; a sub-cent difference there is
+    immaterial and ceiling it would add noise.)"""
+    return math.ceil(kalshi_trade_fee(entry_price, n_contracts, fee_coef) * 100.0) / 100.0
+
+
 def settlement_pnl(entry_price: float, contracts: int, we_win: bool,
                    fee_rate: float = 0.07) -> float:
     """Realized P&L for a settled Kalshi position (raw, caller rounds).
@@ -493,8 +503,9 @@ def settlement_pnl(entry_price: float, contracts: int, we_win: bool,
       loss: −P×n − fee        (lose the stake, still pay the fee)
 
     Shared by live and paper settlement so the two P&L formulas can't drift.
+    The fee is ceiled to the next cent to match how Kalshi actually charges.
     """
-    fee = kalshi_trade_fee(entry_price, contracts, fee_coef=fee_rate)
+    fee = kalshi_trade_fee_ceil(entry_price, contracts, fee_coef=fee_rate)
     if we_win:
         return (1.0 - entry_price) * contracts - fee
     return -entry_price * contracts - fee

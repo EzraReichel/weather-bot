@@ -15,6 +15,7 @@ import logging
 import os
 import signal
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 # ── Logging setup ────────────────────────────────────────────────────────────
@@ -37,8 +38,71 @@ import uvicorn
 from weatherbot.config import settings
 from weatherbot.models.weather_db import init_db
 
+# ── Lifespan (startup / shutdown) ─────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("=" * 60)
+    logger.info("Kalshi Weather Arb Bot")
+    logger.info("=" * 60)
+
+    init_db()
+
+    if not settings.LIVE_TRADING:
+        logger.info("=" * 60)
+        logger.info("PAPER TRADING MODE — no real trades will be placed")
+        logger.info("=" * 60)
+
+    # Dashboard auth posture (see the dashboard_auth middleware).
+    if not settings.DASHBOARD_TOKEN:
+        if settings.LIVE_TRADING:
+            logger.warning("!" * 60)
+            logger.warning("SECURITY: DASHBOARD_TOKEN is UNSET while LIVE_TRADING=true.")
+            logger.warning("Dashboard is FAIL-CLOSED — every route except /health "
+                           "returns 503 until DASHBOARD_TOKEN is set.")
+            logger.warning("!" * 60)
+        else:
+            logger.info("DASHBOARD_TOKEN unset (LIVE_TRADING=false) — dashboard open for local dev")
+    else:
+        logger.info("Dashboard auth enabled (Bearer token / ?token= / cookie)")
+    logger.info(f"Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}  |  "
+                f"Kelly: {settings.KELLY_FRACTION:.0%}  |  "
+                f"Fee rate: {settings.KALSHI_FEE_RATE:.0%}  |  "
+                f"Scan: {settings.SCAN_INTERVAL_SECONDS}s")
+
+    try:
+        from weatherbot.data.kalshi_client import fetch_live_balance
+        from weatherbot.notifications.discord import send_startup_message
+        startup_balance = await fetch_live_balance()
+        send_startup_message(not settings.LIVE_TRADING, startup_balance)
+    except Exception as e:
+        logger.warning(f"Discord startup ping failed: {e}")
+
+    from weatherbot.models.trade import init_trade_db
+    init_trade_db()
+    logger.info("Trade DB initialized")
+
+    if settings.BACKTEST_CAPTURE:
+        try:
+            from weatherbot.models.backtest_db import init_backtest_db
+            init_backtest_db()
+            logger.info("Backtest capture DB initialized")
+        except Exception as e:
+            logger.warning(f"Backtest DB init failed (capture will retry lazily): {e}")
+
+    from weatherbot.core.scheduler import start_scheduler
+    start_scheduler()
+    logger.info(f"Mission Control UI at http://0.0.0.0:{settings.PORT}")
+
+    yield
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+    from weatherbot.core.scheduler import stop_scheduler
+    stop_scheduler()
+    logger.info("Shutdown complete.")
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
-app = FastAPI(docs_url=None, redoc_url=None)
+app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
 FRONTEND_DIR = Path(__file__).parent / "dashboard"
 
@@ -582,69 +646,6 @@ async def api_bt_run_start(request: Request, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_run_backtest_job, run_id, body)
     return {"run_id": run_id, "status": "queued"}
-
-
-# ── Startup / shutdown hooks ─────────────────────────────────────────────────
-@app.on_event("startup")
-async def on_startup():
-    logger.info("=" * 60)
-    logger.info("Kalshi Weather Arb Bot")
-    logger.info("=" * 60)
-
-    init_db()
-
-    if not settings.LIVE_TRADING:
-        logger.info("=" * 60)
-        logger.info("PAPER TRADING MODE — no real trades will be placed")
-        logger.info("=" * 60)
-
-    # Dashboard auth posture (see the dashboard_auth middleware).
-    if not settings.DASHBOARD_TOKEN:
-        if settings.LIVE_TRADING:
-            logger.warning("!" * 60)
-            logger.warning("SECURITY: DASHBOARD_TOKEN is UNSET while LIVE_TRADING=true.")
-            logger.warning("Dashboard is FAIL-CLOSED — every route except /health "
-                           "returns 503 until DASHBOARD_TOKEN is set.")
-            logger.warning("!" * 60)
-        else:
-            logger.info("DASHBOARD_TOKEN unset (LIVE_TRADING=false) — dashboard open for local dev")
-    else:
-        logger.info("Dashboard auth enabled (Bearer token / ?token= / cookie)")
-    logger.info(f"Min edge: {settings.MIN_EDGE_THRESHOLD:.0%}  |  "
-                f"Kelly: {settings.KELLY_FRACTION:.0%}  |  "
-                f"Fee rate: {settings.KALSHI_FEE_RATE:.0%}  |  "
-                f"Scan: {settings.SCAN_INTERVAL_SECONDS}s")
-
-    try:
-        from weatherbot.data.kalshi_client import fetch_live_balance
-        from weatherbot.notifications.discord import send_startup_message
-        startup_balance = await fetch_live_balance()
-        send_startup_message(not settings.LIVE_TRADING, startup_balance)
-    except Exception as e:
-        logger.warning(f"Discord startup ping failed: {e}")
-
-    from weatherbot.models.trade import init_trade_db
-    init_trade_db()
-    logger.info("Trade DB initialized")
-
-    if settings.BACKTEST_CAPTURE:
-        try:
-            from weatherbot.models.backtest_db import init_backtest_db
-            init_backtest_db()
-            logger.info("Backtest capture DB initialized")
-        except Exception as e:
-            logger.warning(f"Backtest DB init failed (capture will retry lazily): {e}")
-
-    from weatherbot.core.scheduler import start_scheduler
-    start_scheduler()
-    logger.info(f"Mission Control UI at http://0.0.0.0:{settings.PORT}")
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    from weatherbot.core.scheduler import stop_scheduler
-    stop_scheduler()
-    logger.info("Shutdown complete.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

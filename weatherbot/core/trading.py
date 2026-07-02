@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 from weatherbot.config import settings
 from weatherbot.core.paper_trading import _fetch_kalshi_result, is_warm_outlook
-from weatherbot.core.probability import settlement_pnl
+from weatherbot.core.probability import kalshi_trade_fee_ceil, settlement_pnl
 from weatherbot.models.trade import SessionLocal, Trade, init_trade_db
 
 logger = logging.getLogger("weatherbot")
@@ -268,7 +268,15 @@ async def log_live_trade(signal) -> Optional[Trade]:
             send_live_order_failed_alert(market.market_id, reason)
             return None
 
-        order_cost = round(contracts * entry_price, 2)
+        # Include the ceiled Kalshi fee so the balance check reserves the full
+        # cash the order will actually consume (contracts × price + fee), not
+        # just the notional — otherwise a just-barely-affordable order can be
+        # rejected by Kalshi for insufficient funds.
+        order_cost = round(
+            contracts * entry_price
+            + kalshi_trade_fee_ceil(entry_price, contracts, settings.KALSHI_FEE_RATE),
+            2,
+        )
         try:
             balance_data = await client.get_balance()
             # Kalshi returns `balance` in cents; `balance_dollars` is the string equivalent
@@ -547,11 +555,11 @@ async def settle_live_trades() -> List[Trade]:
                                  settings.KALSHI_FEE_RATE)
             result = "win" if we_win else "loss"
 
-            trade.resolved    = True
-            trade.result      = result
-            trade.pnl         = round(pnl, 2)
-            trade.actual_temp = 1.0 if yes_wins else 0.0
-            trade.resolved_at = datetime.utcnow()
+            trade.resolved     = True
+            trade.result       = result
+            trade.pnl          = round(pnl, 2)
+            trade.yes_resolved = bool(yes_wins)   # was: actual_temp = 0/1 proxy
+            trade.resolved_at  = datetime.utcnow()
             settled.append(trade)
 
             icon = "✅" if result == "win" else "❌"

@@ -61,7 +61,11 @@ class Trade(TradeBase):
     orders           = Column(String, nullable=True)
 
     # Settlement
-    actual_temp      = Column(Float, nullable=True)         # 1.0=YES won, 0.0=NO won
+    # Legacy: actual_temp was repurposed to hold the 0/1 YES-resolved proxy. New
+    # rows write the outcome to yes_resolved instead and leave actual_temp null;
+    # read via the yes_outcome property, which falls back to actual_temp.
+    actual_temp      = Column(Float, nullable=True)         # legacy 0/1 proxy (null on new rows)
+    yes_resolved     = Column(Boolean, nullable=True)       # True=YES resolved, False=NO, null=unsettled/legacy
     resolved         = Column(Boolean, default=False)
     result           = Column(String, nullable=True)        # "win", "loss", or "push"
     pnl              = Column(Float, nullable=True)
@@ -69,6 +73,15 @@ class Trade(TradeBase):
     # Set once the settlement Discord alert has been sent. Decouples settling
     # (persist `resolved`) from notifying so a rollback/restart can't re-alert.
     notified_at      = Column(DateTime, nullable=True)
+
+    @property
+    def yes_outcome(self) -> float:
+        """1.0 if the market resolved YES, else 0.0. Prefers the yes_resolved
+        column; falls back to the legacy actual_temp 0/1 proxy for rows settled
+        before yes_resolved existed."""
+        if self.yes_resolved is not None:
+            return 1.0 if self.yes_resolved else 0.0
+        return 1.0 if (self.actual_temp or 0) >= 1.0 else 0.0
 
 
 class ModelCityAccuracy(TradeBase):
@@ -128,6 +141,7 @@ def _migrate():
             ("notified_at",     "TIMESTAMP"),
             ("target_contracts", "INTEGER"),
             ("model_data_age_hours", "FLOAT"),
+            ("yes_resolved",    "BOOLEAN"),
         ]
         for col, typedef in new_cols:
             if col not in cols:
