@@ -100,7 +100,11 @@ class WeatherTradingSignal:
     @property
     def passes_paper_threshold(self) -> bool:
         """Always just MIN_EDGE_THRESHOLD — used for paper trading to capture all signals."""
-        return abs(self.edge) >= settings.MIN_EDGE_THRESHOLD
+        # NOT abs(): edge is execution-aware (model prob minus the ask actually
+        # paid) and direction is already chosen, so a favorable trade has a
+        # POSITIVE edge. abs() let a negative-edge trade (spread > 2×threshold)
+        # clear the bar and reach a live order — the item-3 bug.
+        return self.edge >= settings.MIN_EDGE_THRESHOLD
 
     @property
     def passes_threshold(self) -> bool:
@@ -108,7 +112,8 @@ class WeatherTradingSignal:
         edge_threshold = settings.MIN_EDGE_THRESHOLD
         if self.low_confidence_flag or self.agreement == "LOW":
             edge_threshold = max(edge_threshold, LOW_CONFIDENCE_EDGE_OVERRIDE)
-        return abs(self.edge) >= edge_threshold
+        # NOT abs() — see passes_paper_threshold. A negative edge never passes.
+        return self.edge >= edge_threshold
 
 
 def _model_data_age_hours(now_et: datetime) -> float:
@@ -575,7 +580,8 @@ async def generate_weather_signal(market: WeatherMarket, live_bankroll: Optional
     # Reasoning string
     min_edge = min_profitable_edge(entry_price, fee_coef=settings.KALSHI_FEE_RATE)
     req_edge = LOW_CONFIDENCE_EDGE_OVERRIDE if (low_conf or agreement == "LOW") else settings.MIN_EDGE_THRESHOLD
-    status = "ACTIONABLE" if abs(edge) >= req_edge else "FILTERED"
+    # Match the (no-abs) threshold semantics: a negative edge is never actionable.
+    status = "ACTIONABLE" if edge >= req_edge else "FILTERED"
 
     filter_notes = []
     if entry_too_high:
@@ -795,10 +801,14 @@ async def scan_for_weather_signals() -> ScanReport:
         if s.passes_threshold:
             continue
         req = LOW_CONFIDENCE_EDGE_OVERRIDE if (s.low_confidence_flag or s.agreement == "LOW") else settings.MIN_EDGE_THRESHOLD
-        if s.agreement == "LOW" and abs(s.edge) >= settings.MIN_EDGE_THRESHOLD:
+        # No-abs, matching passes_threshold: "low_agreement" means a genuinely
+        # positive edge that clears the normal bar but is held back only by the
+        # raised LOW-agreement bar; everything else short of `req` is below_edge
+        # (a negative edge lands here, as it should).
+        if s.agreement == "LOW" and s.edge >= settings.MIN_EDGE_THRESHOLD:
             s.filter_reason = "low_agreement"
             low_agreement_filtered.append(s)
-        elif abs(s.edge) < req:
+        elif s.edge < req:
             s.filter_reason = "below_edge"
             below_edge.append(s)
 
