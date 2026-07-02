@@ -578,16 +578,23 @@ async def settle_live_trades() -> List[Trade]:
     return settled
 
 
-async def _fetch_order_fill(client, order_id, fallback_n) -> Optional[Tuple[int, int]]:
+async def _fetch_order_fill(client, order_id, fallback_n, label="") -> Optional[Tuple[int, int]]:
     """
     Resolve a single Kalshi order to (filled_contracts, resting_contracts), or
-    None if the status couldn't be determined (transient API error / unknown
-    status). `fallback_n` is used when there's no order id, or a 'filled' order
-    reports no count.
+    None if the status couldn't be determined (transient API error, unknown
+    status, or a MISSING order id). `fallback_n` is only used when a 'filled'
+    order reports no count. `label` names the trade for the missing-id warning.
     """
     if not order_id:
-        # No order id recorded — assume the recorded size fully filled.
-        return (fallback_n, 0)
+        # No order id recorded — UNDETERMINED, not "assume fully filled": if
+        # placement succeeded but the id failed to parse, booking it as filled
+        # would create phantom P&L. Return None so _position_fill_status and
+        # settlement defer conservatively.
+        logger.warning(
+            f"Order fill undetermined for {label or 'trade'}: no order id "
+            f"recorded ({fallback_n} contract(s)) — not assuming filled"
+        )
+        return None
     try:
         data = await client.get_order(order_id)
         order = data.get("order", data)
@@ -642,7 +649,7 @@ async def _position_fill_status(client, trade) -> Tuple[int, int, int, List[dict
     for o in _position_orders(trade):
         n     = int(o.get("n", 0) or 0)
         price = o.get("price")
-        res = await _fetch_order_fill(client, o.get("id"), n)
+        res = await _fetch_order_fill(client, o.get("id"), n, label=trade.ticker)
         if res is None:
             # Status unknown — fall back to the recorded fill so the basis math
             # still works, and flag it so the reconcile path stays conservative.
