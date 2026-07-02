@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
 from weatherbot.config import settings
-from weatherbot.core.paper_trading import _fetch_kalshi_result
+from weatherbot.core.paper_trading import _fetch_kalshi_result, is_warm_outlook
 from weatherbot.models.trade import SessionLocal, Trade, init_trade_db
 
 logger = logging.getLogger("weatherbot")
@@ -120,6 +120,43 @@ async def log_live_trade(signal) -> Optional[Trade]:
         anchor = same_side_open[0] if same_side_open else None
 
         if anchor is None:
+            # ── Cross-bracket position guard (fresh entries only) ─────────────
+            # The same-ticker reconciliation above only sees THIS date+threshold
+            # market. Across scans, live could otherwise stack correlated
+            # positions on different brackets of the same city/day/metric, or
+            # hold contradictory warm/cold bets. Mirror paper's contradiction
+            # guard against every unresolved live position for this city/date:
+            #   • opposite warm/cold outlook  → skip (never hold both).
+            #   • same metric, same outlook, different ticker → skip: one live
+            #     position per city/date/metric bracket.
+            # Top-ups (anchor is not None) are exempt — they only add to the
+            # position that already passed this guard when it was opened.
+            new_is_warm = is_warm_outlook(market.direction, signal.direction)
+            siblings = db.query(Trade).filter(
+                Trade.is_paper == False,
+                Trade.resolved == False,
+                Trade.city == market.city_key,
+                Trade.resolution_date == market.target_date.isoformat(),
+            ).all()
+            for prior in siblings:
+                prior_is_warm = is_warm_outlook(prior.market_direction, prior.side)
+                if prior_is_warm != new_is_warm:
+                    logger.info(
+                        f"Live skip: {market.market_id} "
+                        f"({'warm' if new_is_warm else 'cold'}) contradicts open "
+                        f"{prior.ticker} ({'warm' if prior_is_warm else 'cold'}) "
+                        f"for {market.city_key} on {market.target_date.isoformat()}"
+                    )
+                    return None
+                if prior.metric == market.metric and prior.ticker != market.market_id:
+                    logger.info(
+                        f"Live skip: {market.market_id} — already hold "
+                        f"{prior.ticker} (same city/date/metric, different "
+                        f"bracket); one live position per "
+                        f"{market.city_key}/{market.target_date.isoformat()}/{market.metric}"
+                    )
+                    return None
+
             # Fresh entry — order the full Kelly target.
             contracts = target_contracts
         else:

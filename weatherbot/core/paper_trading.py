@@ -30,6 +30,21 @@ def _is_weather_ticker(ticker: str) -> bool:
     return any(ticker.upper().startswith(p) for p in _WEATHER_PREFIXES)
 
 
+def is_warm_outlook(market_direction: str, side: str) -> bool:
+    """Whether a trade profits from a WARM outcome.
+
+    warm: above-threshold YES, or below-threshold NO.
+    cold: above-threshold NO, or below-threshold YES (the inverse).
+
+    Shared by the paper contradiction guard and the live position guard so the
+    two classifications can't drift apart.
+    """
+    return (
+        (market_direction == "above" and side == "yes") or
+        (market_direction == "below" and side == "no")
+    )
+
+
 def log_paper_trade(signal) -> Optional[Trade]:
     """
     Persist a paper trade from an actionable WeatherTradingSignal.
@@ -62,12 +77,7 @@ def log_paper_trade(signal) -> Optional[Trade]:
     contracts = max(1, int(signal.suggested_size / entry_price))
 
     # Determine whether this trade implies a warm or cold outlook.
-    # warm: above-threshold YES, or below-threshold NO
-    # cold: above-threshold NO, or below-threshold YES
-    new_is_warm = (
-        (market.direction == "above" and signal.direction == "yes") or
-        (market.direction == "below" and signal.direction == "no")
-    )
+    new_is_warm = is_warm_outlook(market.direction, signal.direction)
 
     db = SessionLocal()
     try:
@@ -90,10 +100,7 @@ def log_paper_trade(signal) -> Optional[Trade]:
             Trade.resolved == False,
         ).all()
         for prior in same_city_trades:
-            prior_is_warm = (
-                (prior.market_direction == "above" and prior.side == "yes") or
-                (prior.market_direction == "below" and prior.side == "no")
-            )
+            prior_is_warm = is_warm_outlook(prior.market_direction, prior.side)
             if prior_is_warm != new_is_warm:
                 logger.warning(
                     f"Contradictory trade skipped: {market.market_id} "
