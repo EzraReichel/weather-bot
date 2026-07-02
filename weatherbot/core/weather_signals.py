@@ -27,7 +27,16 @@ COLD_DAY_MARGIN            = 4.0   # °F below threshold required for cold-day Y
 COLD_DAY_NWS_MIN           = 0.85  # NWS prob floor for cold-day YES exception
 YES_ENTRY_FLOOR            = 0.30  # minimum entry price for YES bets (empirical: <30¢ wins ~7%)
 
-# Trading hours — model runs fire at these ET hours; data older than MAX_AGE is stale
+# Staleness proxy: the ET times by which each GEFS cycle's data has landed and
+# been picked up. GEFS cycles at 00/06/12/18 UTC and Open-Meteo publishes ~3-4h
+# later, so fresh data is in hand around 03:30/09:30/15:30/21:30 ET — the same
+# schedule scheduler.py fires its model-run cron scans on (keep the two in sync).
+# TODO(model-clock): these are FIXED ET hours, but true availability is anchored
+# to UTC (cycle + publish lag). Across DST the ET/UTC offset shifts by 1h, and
+# the publish lag varies, so _model_data_age_hours can be off by up to ~1h-plus
+# from real data age. A precise fix would derive run times from UTC cycle+lag
+# rather than fixed ET hours — deferred because it changes the live staleness
+# gate's behavior and needs operator sign-off.
 MODEL_RUN_HOURS_ET       = [(3, 30), (9, 30), (15, 30), (21, 30)]
 MODEL_DATA_MAX_AGE_HOURS = 5.0   # skip if last model run was >5h ago
 from weatherbot.data.weather_markets import WeatherMarket

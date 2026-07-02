@@ -33,9 +33,29 @@ scheduler: Optional[AsyncIOScheduler] = None
 _alerted_tickers: dict = {}   # ticker -> datetime of last alert
 _ALERT_DEDUP_HOURS = 6
 
+# Serializes scans across every trigger. The interval scan and the 4 model-run
+# cron scans are separate APScheduler job IDs, and max_instances=1 is per-job,
+# so without this two scans could overlap — and two concurrent log_live_trade
+# calls for the same market could each see "no open position" and double-order.
+_scan_lock = asyncio.Lock()
+
 
 async def weather_scan_job():
-    """Scan Kalshi weather markets, generate signals, fire Discord alerts."""
+    """Scan Kalshi weather markets, generate signals, fire Discord alerts.
+
+    Serialized by ``_scan_lock``: an overlapping trigger SKIPS (does not queue)
+    so at most one scan runs at a time. The non-blocking check is safe because
+    an uncontended asyncio.Lock.acquire() doesn't yield, so the check-then-
+    acquire can't interleave two scans past the guard.
+    """
+    if _scan_lock.locked():
+        logger.info("Weather scan already in progress — skipping overlapping trigger")
+        return
+    async with _scan_lock:
+        await _run_weather_scan()
+
+
+async def _run_weather_scan():
     start = time.time()
     logger.info("── Weather scan started ──────────────────────────────────")
 
@@ -265,10 +285,15 @@ def start_scheduler():
         max_instances=1,
     )
 
-    # Model-run trigger scans — fire 15 minutes after GFS/ECMWF publish
-    # GFS runs: ~00Z, 06Z, 12Z, 18Z → products available ~03:30, 09:30, 15:30, 21:30 UTC
-    # In ET: 23:30, 05:30, 11:30, 17:30 (standard) / 00:30, 06:30, 12:30, 18:30 (DST)
-    # We use ET via timezone param so DST is handled automatically
+    # Model-run trigger scans — one shortly after each GFS/GEFS cycle publishes.
+    # GEFS cycles run 4×/day at 00Z/06Z/12Z/18Z; Open-Meteo publishes each ~3-4h
+    # later. We fire at 03:30/09:30/15:30/21:30 ET (= 07:30/13:30/19:30/01:30 UTC
+    # in EDT), which lands after the matching cycle is available: at 03:30 ET the
+    # freshest cycle is 00Z, at 09:30 ET it's 06Z, etc. — hence the labels below.
+    # ET via the timezone param so DST is handled automatically. These ET hours
+    # are the same schedule the staleness gate keys off (MODEL_RUN_HOURS_ET in
+    # weather_signals.py) — keep the two in sync. See the TODO there about the
+    # residual UTC/ET offset in that staleness proxy.
     for hour, label in [(3, "00Z"), (9, "06Z"), (15, "12Z"), (21, "18Z")]:
         scheduler.add_job(
             weather_scan_job,
