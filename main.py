@@ -362,9 +362,33 @@ async def api_config():
     }
 
 
+# Only these tunables may be written back to .env from the dashboard. Anything
+# outside this set is rejected — in particular LIVE_TRADING, KALSHI_*,
+# DATABASE_URL, DISCORD_*, and DASHBOARD_TOKEN must NEVER be settable here, and
+# keys that render.yaml overrides in prod would be silently ineffective anyway.
+# The auth middleware already gates this route; the allowlist is defense in depth.
+CONFIG_WRITE_ALLOWLIST = frozenset({
+    "MIN_EDGE_THRESHOLD", "KELLY_FRACTION", "SCAN_INTERVAL_SECONDS",
+    "WEATHER_MAX_TRADE_SIZE", "LIVE_MAX_TRADE_SIZE", "MIN_ASK_SIZE",
+    "MIN_VOLUME_24H", "CITY_OVERRIDE",
+})
+
+
 @app.post("/api/config")
 async def api_config_update(request: Request):
     body = await request.json()
+
+    # Reject the whole request if any key is outside the allowlist — name the
+    # first offender so the caller knows what was refused. Nothing is written
+    # unless every key is permitted.
+    for key in body:
+        if key not in CONFIG_WRITE_ALLOWLIST:
+            return JSONResponse(
+                {"error": f"key not writable via /api/config: {key}",
+                 "allowed": sorted(CONFIG_WRITE_ALLOWLIST)},
+                status_code=400,
+            )
+
     if not ENV_FILE.exists():
         lines = []
     else:
