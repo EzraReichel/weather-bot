@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import List, Optional
 
 from weatherbot.config import settings
+from weatherbot.core.probability import settlement_pnl
 from weatherbot.data.kalshi_client import KalshiClient, kalshi_credentials_present
 from weatherbot.models.trade import SessionLocal, Trade, ModelCityAccuracy, init_trade_db
 
@@ -214,13 +215,9 @@ async def settle_paper_trades() -> List[Trade]:
             # We bet "yes" or "no" — did we win?
             we_win = yes_wins if pt.side == "yes" else not yes_wins
 
-            fee = settings.KALSHI_FEE_RATE * pt.contracts * pt.entry_price * (1.0 - pt.entry_price)
-            if we_win:
-                pnl = (1.0 - pt.entry_price) * pt.contracts - fee
-                result = "win"
-            else:
-                pnl = pt.entry_price * pt.contracts * -1.0 - fee
-                result = "loss"
+            pnl = settlement_pnl(pt.entry_price, pt.contracts, we_win,
+                                 settings.KALSHI_FEE_RATE)
+            result = "win" if we_win else "loss"
 
             pt.resolved    = True
             pt.result      = result

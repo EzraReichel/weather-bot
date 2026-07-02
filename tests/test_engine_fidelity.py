@@ -25,17 +25,28 @@ import sys
 from datetime import timezone
 from pathlib import Path
 
+import pytest
 from dotenv import load_dotenv
 
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import text
+from sqlalchemy import inspect as sa_inspect, text
 
 from weatherbot.backtest.archive import load_archive
 from weatherbot.backtest.decision import decide
 from weatherbot.core.strategy import StrategyParams
-from weatherbot.models.weather_db import SessionLocal
+from weatherbot.models.weather_db import SessionLocal, engine
+
+
+def _bt_archive_present() -> bool:
+    """Whether the bt_* archive tables exist — a fresh clone (empty DB) has none,
+    so this guardrail has nothing to replay and must skip rather than error."""
+    try:
+        return "bt_signal_snapshots" in sa_inspect(engine).get_table_names()
+    except Exception:
+        return False
+
 
 PROB_TOL = 0.03
 EDGE_TOL = 0.03
@@ -128,6 +139,10 @@ def run() -> bool:
         db.close()
 
 
+@pytest.mark.skipif(
+    not _bt_archive_present(),
+    reason="bt_signal_snapshots archive absent (fresh clone) — nothing to replay",
+)
 def test_engine_fidelity():
     assert run(), "backtest decide() drifted from captured live signals — see report"
 

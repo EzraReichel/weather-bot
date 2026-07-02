@@ -484,6 +484,22 @@ def kalshi_trade_fee(entry_price: float, n_contracts: int = 1, fee_coef: float =
     return fee_coef * n_contracts * entry_price * (1.0 - entry_price)
 
 
+def settlement_pnl(entry_price: float, contracts: int, we_win: bool,
+                   fee_rate: float = 0.07) -> float:
+    """Realized P&L for a settled Kalshi position (raw, caller rounds).
+
+    The fee C×n×P×(1−P) is charged at execution regardless of outcome:
+      win:  (1 − P)×n − fee   (collect the other side's dollar, minus fee)
+      loss: −P×n − fee        (lose the stake, still pay the fee)
+
+    Shared by live and paper settlement so the two P&L formulas can't drift.
+    """
+    fee = kalshi_trade_fee(entry_price, contracts, fee_coef=fee_rate)
+    if we_win:
+        return (1.0 - entry_price) * contracts - fee
+    return -entry_price * contracts - fee
+
+
 def min_profitable_edge(entry_price: float, fee_coef: float = 0.07) -> float:
     """
     Minimum model edge to break even after Kalshi fees.

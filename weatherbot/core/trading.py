@@ -6,6 +6,7 @@ from typing import List, Optional, Tuple
 
 from weatherbot.config import settings
 from weatherbot.core.paper_trading import _fetch_kalshi_result, is_warm_outlook
+from weatherbot.core.probability import settlement_pnl
 from weatherbot.models.trade import SessionLocal, Trade, init_trade_db
 
 logger = logging.getLogger("weatherbot")
@@ -542,13 +543,9 @@ async def settle_live_trades() -> List[Trade]:
             yes_wins = (kalshi_result == "yes")
             we_win = yes_wins if trade.side == "yes" else not yes_wins
 
-            fee = settings.KALSHI_FEE_RATE * filled_count * trade.entry_price * (1.0 - trade.entry_price)
-            if we_win:
-                pnl = (1.0 - trade.entry_price) * filled_count - fee
-                result = "win"
-            else:
-                pnl = trade.entry_price * filled_count * -1.0 - fee
-                result = "loss"
+            pnl = settlement_pnl(trade.entry_price, filled_count, we_win,
+                                 settings.KALSHI_FEE_RATE)
+            result = "win" if we_win else "loss"
 
             trade.resolved    = True
             trade.result      = result
