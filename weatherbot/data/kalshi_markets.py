@@ -317,7 +317,12 @@ async def fetch_kalshi_weather_markets(
                     elif no_ask_c is not None:
                         no_price = no_ask_c / 100.0
                     else:
-                        no_price = 1.0 - yes_price
+                        # No NO-ask quoted. Do NOT synthesize 1 - yes_price: that
+                        # is the yes ASK, i.e. the NO BID, so it overstates NO
+                        # edge by the full spread on exactly the illiquid markets
+                        # missing this field. Mark the NO side untradeable —
+                        # signal generation skips entry_price <= 0.
+                        no_price = 0.0
 
                     # Near-certain markets — model can't beat these, skip
                     if yes_price > 0.95 or yes_price < 0.05:
